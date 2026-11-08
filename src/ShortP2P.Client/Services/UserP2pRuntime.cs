@@ -758,9 +758,11 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         {
             // ignore
         }
-        catch
+        catch (Exception ex)
         {
             // safety: цикл приёма host-транспорта не должен падать
+            _logger.LogWarning(ex, "Failed to accept an invite from an additional transport (kind {Kind})",
+                remoteAddress.Kind);
         }
     }
 
@@ -769,7 +771,10 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (!ChatInviteCodec.TryParse(datagram.Span, out var initiator, out _, out _, out _, out _))
+        {
+            _logger.LogTrace("Dropped a malformed invite frame from kind {Kind}", remoteAddress.Kind);
             return;
+        }
 
         await IncomingChatInviteHandler.TryAcceptAsync(datagram, _auth, _chats,
             sendInviteReplyAsync,
@@ -777,6 +782,9 @@ public sealed class UserP2pRuntime : IAsyncDisposable
             Settings,
             Settings.EnableBluetoothTransport ? Settings.SelectedBluetoothAdapterMac : null,
             CancellationToken.None).ConfigureAwait(false);
+
+        _logger.LogInformation("Incoming chat invite from {Peer} via transport kind {Kind} accepted",
+            initiator.ToShortString(), remoteAddress.Kind);
 
         var user = _auth.CurrentUser;
         if (user == null)
