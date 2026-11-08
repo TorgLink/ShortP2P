@@ -863,12 +863,44 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (messenger == null)
         {
             _logger.LogWarning(
-                "Chat {ChatId}: dropped inbound cipher — messenger/crypto session not ready",
+                "Chat {ChatId}: dropped inbound cipher — messenger/crypto session not ready; nudging handshake",
                 _chat.Id);
+            NudgeCryptoAfterInboundWithoutSession();
             return;
         }
 
         messenger.TryAcceptCipher(msg);
+    }
+
+    /// <summary>
+    ///     Cipher arrived before local AES keys: follower re-asks 0x04; leader re-drives 0x01.
+    ///     Common on LoRa when handshake chunks timed out but a later cipher chunk train completed.
+    /// </summary>
+    private void NudgeCryptoAfterInboundWithoutSession()
+    {
+        MergeAdditionalTransportPeerAddresses();
+        PreferAdditionalTransportEndpoint();
+        var token = _cts?.Token ?? CancellationToken.None;
+        if (IsCryptoSessionLeader())
+            _ = TryConfirmCryptoSessionAsync(token);
+        else
+            _ = SendSessionSetupRequestQuietAsync(token);
+    }
+
+    private async Task SendSessionSetupRequestQuietAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SendSessionSetupRequestPacketAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // shutting down
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: session setup nudge after inbound cipher failed", _chat.Id);
+        }
     }
 
     /// <summary>
@@ -1462,13 +1494,40 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     private void OnHostTransportPresenceForPendingFlush(object? sender, string peerNetworkIdShort)
     {
-        if (!HasPendingOutgoing())
-            return;
         if (string.IsNullOrWhiteSpace(_chat.PeerNetworkIdShort))
             return;
         if (!ChatRepository.PeerNetworkIdsEqual(peerNetworkIdShort, _chat.PeerNetworkIdShort))
             return;
+
+        MergeAdditionalTransportPeerAddresses();
+        PreferAdditionalTransportEndpoint();
+        var token = _cts?.Token ?? CancellationToken.None;
+
+        // Peer is on the mesh: keep LoRa handshake alive until probe/crypto is ready both sides.
+        if (!IsCryptoSessionLeader() && !IsFollowerCryptoReady())
+            _ = SendSessionSetupRequestQuietAsync(token);
+        else if (IsCryptoSessionLeader() && !_cryptoProbeRoundTripOk)
+            _ = ResendLeaderHandshakeQuietAsync(token);
+
+        if (!HasPendingOutgoing())
+            return;
         StartFlushPendingInBackground();
+    }
+
+    private async Task ResendLeaderHandshakeQuietAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await EnsureSessionAsInitiatorAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // shutting down
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: leader handshake resend on mesh presence failed", _chat.Id);
+        }
     }
 
     private void OnDiscoveryPingForPendingFlush(object? sender, DiscoveryPingReceivedEventArgs e)
