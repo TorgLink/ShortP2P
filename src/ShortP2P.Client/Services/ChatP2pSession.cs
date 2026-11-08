@@ -848,10 +848,27 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private void OnCipherReceived(object? sender, TransportReceiveMessage msg)
     {
         if (!ShouldAcceptIncomingFrom(msg.RemoteAddress))
+        {
+            _logger.LogInformation(
+                "Chat {ChatId}: ignored inbound cipher from {Remote} (endpoint not accepted)",
+                _chat.Id, FormatTransportAddress(msg.RemoteAddress));
             return;
+        }
+
+        _logger.LogInformation(
+            "Chat {ChatId}: RX cipher {Bytes} bytes from {Remote}",
+            _chat.Id, msg.Payload.Length, FormatTransportAddress(msg.RemoteAddress));
         TryRememberAdditionalPeer(msg.RemoteAddress);
         var messenger = _messenger;
-        messenger?.TryAcceptCipher(msg);
+        if (messenger == null)
+        {
+            _logger.LogWarning(
+                "Chat {ChatId}: dropped inbound cipher — messenger/crypto session not ready",
+                _chat.Id);
+            return;
+        }
+
+        messenger.TryAcceptCipher(msg);
     }
 
     /// <summary>
@@ -1557,11 +1574,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         .ConfigureAwait(false);
                     continue;
                 }
-                catch (Exception ex) when (IsDeferrableSendFailure(ex) && CanQueueUntilPeerSeenOnLan())
+                catch (Exception ex) when (IsDeferrableSendFailure(ex) &&
+                                           (CanQueueUntilPeerSeenOnLan() || HasHostTransportEndpoint()))
                 {
-                    _logger.LogDebug(ex,
-                        "Chat {ChatId}: deferring outbound message {MessageId} until peer is seen on LAN",
+                    _logger.LogInformation(ex,
+                        "Chat {ChatId}: deferring outbound message {MessageId} (crypto/path not ready; LAN or LoRa presence will retry)",
                         _chat.Id, nextId);
+                    MergeAdditionalTransportPeerAddresses();
+                    PreferAdditionalTransportEndpoint();
                     HookPresenceForPendingFlush();
                     return;
                 }
@@ -1661,13 +1681,31 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 if (_messenger == null || !TryGetCryptoSession(out _))
                     throw new InvalidOperationException("P2P crypto session is not ready for outbound delivery.");
 
+                MergeAdditionalTransportPeerAddresses();
                 if (string.IsNullOrEmpty(_chat.RelayRouteBlob))
                 {
                     var dests = BuildOrderedDirectPeerAddresses();
+                    if (dests.Count == 0)
+                        throw new InvalidOperationException(
+                            "No ready peer endpoints for P2P delivery (UDP/BLE/LoRa).");
+                    _logger.LogInformation(
+                        "Chat {ChatId}: P2P send message {MessageId} wireLen={WireLen} via {DestCount} endpoint(s): {Endpoints}",
+                        _chat.Id, messageId, wire.Length, dests.Count,
+                        string.Join(", ", dests.Select(FormatTransportAddress)));
+                    // One check while waiting for the peer delivery ACK.
+                    await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Sent)
+                        .ConfigureAwait(false);
+                    RaiseMessagesChanged();
                     await _messenger.SendBinaryAsyncExpectAck(wire, dests, ct).ConfigureAwait(false);
+                    _logger.LogInformation(
+                        "Chat {ChatId}: delivery ACK received for message {MessageId}",
+                        _chat.Id, messageId);
                 }
                 else
                 {
+                    _logger.LogInformation(
+                        "Chat {ChatId}: P2P relay send message {MessageId} via {Endpoint}",
+                        _chat.Id, messageId, FormatTransportAddress(_peerAddress!));
                     await _messenger.SendBinaryAsync(wire, _peerAddress!, ct).ConfigureAwait(false);
                 }
             },
@@ -1684,7 +1722,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
         else
         {
-            // P2P path: ExpectAck (or relay send) already completed — peer-side delivery confirmed.
+            // P2P path: ExpectAck completed with a real peer ACK (or relay send finished).
             await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Delivered)
                 .ConfigureAwait(false);
         }
@@ -2526,12 +2564,19 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 continue;
             try
             {
+                var frame = packet.Length > 0 ? packet.Span[0] : (byte)0;
+                _logger.LogInformation(
+                    "Chat {ChatId}: TX raw 0x{Frame:X2} ({Bytes} bytes) → {Endpoint}",
+                    _chat.Id, frame, packet.Length, FormatTransportAddress(dest));
                 await transport.SendAsync(packet, dest, cancellationToken).ConfigureAwait(false);
                 anySuccess = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 last = ex;
+                _logger.LogWarning(ex,
+                    "Chat {ChatId}: TX raw failed → {Endpoint}",
+                    _chat.Id, FormatTransportAddress(dest));
                 if (dest.Kind == TransportKind.Udp && IsUdpUnavailableError(ex))
                     _udpOutboundUnavailable = true;
             }
@@ -2556,6 +2601,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         var message = _runtime.Message
                       ?? throw new InvalidOperationException("Message transceiver is not initialized.");
+        _logger.LogInformation(
+            "Chat {ChatId}: TX cipher {Bytes} bytes → {Endpoint}",
+            _chat.Id, cipherPayload.Length, FormatTransportAddress(destination));
         await message.SendAsync(new TransportReceiveMessage(cipherPayload, destination), destination,
             cancellationToken).ConfigureAwait(false);
     }
@@ -3136,7 +3184,15 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     private MessengerOptions CreateMessengerOptions()
     {
-        return new MessengerOptions { MaxBinaryMessageBytes = _media.MaxMessengerBinaryBytes };
+        var ack = (_routingSettings?.LinkTechnology ?? LinkTechnologyPreset.Unlimited).GetMessageAckTimeout();
+        // Host transports (LoRa) need a much longer ACK window than LAN UDP.
+        if (_runtime.AdditionalTransports != null)
+            ack = TimeSpan.FromSeconds(Math.Max(ack.TotalSeconds, 60));
+        return new MessengerOptions
+        {
+            MaxBinaryMessageBytes = _media.MaxMessengerBinaryBytes,
+            DeliveryAckTimeout = ack
+        };
     }
 
     private async Task HandleResponderHandshakeAsync(byte[] handshakePacket, CancellationToken cancellationToken)
@@ -3340,6 +3396,20 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 continue;
             _peerEndpoints.Add(ep);
         }
+    }
+
+    private bool HasHostTransportEndpoint()
+    {
+        MergeAdditionalTransportPeerAddresses();
+        foreach (var ep in _peerEndpoints)
+        {
+            if (ep.Kind is TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer)
+                continue;
+            if (IsOutboundTransportReady(ep.Kind))
+                return true;
+        }
+
+        return IsPeerSeenOnHostTransport();
     }
 
     /// <returns>True when a non-UDP/BT host endpoint was promoted to primary.</returns>
