@@ -213,7 +213,8 @@ public sealed class UserP2pRuntime : IAsyncDisposable
             BluetoothTransport = BluetoothTransport,
             BluetoothAdapterMac = Settings.SelectedBluetoothAdapterMac,
             StopInviteListenerAsync = StopInviteListenerAsync,
-            EnsureInviteListenerAsync = EnsureInviteListenerRunningAsync
+            EnsureInviteListenerAsync = EnsureInviteListenerRunningAsync,
+            ResolveOutboundTransport = destination => _additionalTransports?.ResolveOutbound(destination)
         };
 
     public async ValueTask DisposeAsync()
@@ -687,19 +688,34 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         }
     }
 
-    private static async Task DataPortReceiveLoopAsync(ITransport transport, DataPortMultiplexer multiplexer,
+    /// <summary>
+    ///     Data-port receive loop. Host-provided transports (e.g. LoRa/Meshtastic) multiplex chat frames and
+    ///     invite frames (0x30) on one channel: invites are routed to <see cref="HandleAdditionalInviteAsync" />
+    ///     instead of the handshake/cipher multiplexer, which would drop them.
+    /// </summary>
+    private async Task DataPortReceiveLoopAsync(ITransport transport, DataPortMultiplexer multiplexer,
         CancellationToken cancellationToken)
     {
         try
         {
             await foreach (var msg in transport.Inbound.ReadAllAsync(cancellationToken).ConfigureAwait(false))
-                multiplexer.HandleIncoming(msg);
+            {
+                if (IsInviteFromAdditionalTransport(transport, msg))
+                    _ = Task.Run(() => HandleAdditionalInviteAsync(msg.Payload, msg.RemoteAddress));
+                else
+                    multiplexer.HandleIncoming(msg);
+            }
         }
         catch (OperationCanceledException)
         {
             // expected on stop
         }
     }
+
+    private static bool IsInviteFromAdditionalTransport(ITransport transport, TransportReceiveMessage msg) =>
+        transport.Kind is not (TransportKind.Udp or TransportKind.Bluetooth)
+        && msg.Payload.Length > 0
+        && msg.Payload.Span[0] == ChatInviteCodec.FrameChatInvite;
 
     private async Task HandleInviteAsync(InviteMessage invite, CancellationToken cancellationToken)
     {
@@ -712,31 +728,10 @@ public sealed class UserP2pRuntime : IAsyncDisposable
                 return;
 
             // Не проталкивать cancellationToken в TryAccept: при остановке слушателя иначе можно прервать AddChat по пути.
-            await IncomingChatInviteHandler.TryAcceptAsync(invite.RawPayload, _auth, _chats,
+            await AcceptInviteCoreAsync(invite.RawPayload, invite.RemoteAddress,
                 async (payload, dest, _) => await udp.SendAsync(payload, dest, CancellationToken.None)
                     .ConfigureAwait(false),
-                invite.RemoteAddress,
-                Settings,
-                Settings.EnableBluetoothTransport ? Settings.SelectedBluetoothAdapterMac : null,
-                CancellationToken.None).ConfigureAwait(false);
-
-            var user = _auth.CurrentUser;
-            if (user == null)
-                return;
-            var peerShort = invite.InitiatorNetworkId.ToShortString();
-            if (await _chats.IsPeerBlockedAsync(user.Id, peerShort, cancellationToken).ConfigureAwait(false))
-                return;
-            var chat = await _chats.FindChatByPeerNetworkIdAsync(user.Id, peerShort).ConfigureAwait(false);
-            if (chat == null)
-                return;
-
-            if (_sessionCache.IsStarted(chat.Id) && _sessionCache.TryGetSession(chat.Id, out var session))
-            {
-                await session.HandlePeerInviteResyncAsync(cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            await TryEnsureChatSessionStartedAsync(chat.Id, null, cancellationToken).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -746,6 +741,69 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         {
             // safety: подписчик никогда не должен ронять цикл приёма транспивера
         }
+    }
+
+    /// <summary>
+    ///     Invite arrived on a host transport (e.g. LoRa/Meshtastic): accept it and send the reply
+    ///     invite back over the same transport kind.
+    /// </summary>
+    private async Task HandleAdditionalInviteAsync(ReadOnlyMemory<byte> payload, TransportAddress remoteAddress)
+    {
+        try
+        {
+            await AcceptInviteCoreAsync(payload, remoteAddress, SendInviteReplyViaAdditionalTransportAsync,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // ignore
+        }
+        catch
+        {
+            // safety: цикл приёма host-транспорта не должен падать
+        }
+    }
+
+    private async Task AcceptInviteCoreAsync(ReadOnlyMemory<byte> datagram, TransportAddress remoteAddress,
+        Func<ReadOnlyMemory<byte>, TransportAddress, CancellationToken, Task>? sendInviteReplyAsync,
+        CancellationToken cancellationToken)
+    {
+        if (!ChatInviteCodec.TryParse(datagram.Span, out var initiator, out _, out _, out _, out _))
+            return;
+
+        await IncomingChatInviteHandler.TryAcceptAsync(datagram, _auth, _chats,
+            sendInviteReplyAsync,
+            remoteAddress,
+            Settings,
+            Settings.EnableBluetoothTransport ? Settings.SelectedBluetoothAdapterMac : null,
+            CancellationToken.None).ConfigureAwait(false);
+
+        var user = _auth.CurrentUser;
+        if (user == null)
+            return;
+        var peerShort = initiator.ToShortString();
+        if (await _chats.IsPeerBlockedAsync(user.Id, peerShort, cancellationToken).ConfigureAwait(false))
+            return;
+        var chat = await _chats.FindChatByPeerNetworkIdAsync(user.Id, peerShort).ConfigureAwait(false);
+        if (chat == null)
+            return;
+
+        if (_sessionCache.IsStarted(chat.Id) && _sessionCache.TryGetSession(chat.Id, out var session))
+        {
+            await session.HandlePeerInviteResyncAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await TryEnsureChatSessionStartedAsync(chat.Id, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendInviteReplyViaAdditionalTransportAsync(ReadOnlyMemory<byte> payload,
+        TransportAddress destination, CancellationToken cancellationToken)
+    {
+        var transport = _additionalTransports?.ResolveOutbound(destination);
+        if (transport == null)
+            throw new InvalidOperationException($"No outbound transport for destination kind {destination.Kind}.");
+        await transport.SendAsync(payload, destination, CancellationToken.None).ConfigureAwait(false);
     }
 
     private void RefreshSelfUdpAddresses()

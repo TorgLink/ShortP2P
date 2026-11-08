@@ -69,7 +69,10 @@
     <Compile Include="..\ShortP2P.Client\Services\PeerBlacklist.cs" />
     <Compile Include="..\ShortP2P.Client\Services\ChatSessionCache.cs" />
     <Compile Include="..\ShortP2P.Client\Services\PeerKeySource.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\LanChatStartContext.cs" />
     <Compile Include="..\ShortP2P.Client\Services\LanChatStartFromDiscovery.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\LanChatStartKind.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\LanChatStartResult.cs" />
     <Compile Include="..\ShortP2P.Client\Services\MessengerServers\*.cs" />
     <Compile Include="..\ShortP2P.Client\ProfileBackup\*.cs" />
     <Compile Include="..\ShortP2P.Discovery\PeerIdentity.cs" />
