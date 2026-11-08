@@ -22,4 +22,13 @@ public interface IAdditionalTransportProvider
     ///     (e.g. Meshtastic REQ-DIR-3 step 4).
     /// </summary>
     void RememberPeer(byte[] networkIdWire12, TransportAddress from);
+
+    /// <summary>
+    ///     Whether a peer NetworkId (short form) was heard on this transport within its keep-alive
+    ///     freshness window (e.g. mesh presence pings once per minute → online until two are missed).
+    /// </summary>
+    bool IsPeerRecentlySeen(string networkIdShort);
+
+    /// <summary>Raised with the peer NetworkId (short form) when a keep-alive/presence from it arrives.</summary>
+    event EventHandler<string>? PeerPresenceSeen;
 }

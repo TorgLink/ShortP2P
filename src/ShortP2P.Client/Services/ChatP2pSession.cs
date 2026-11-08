@@ -1317,10 +1317,18 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     private void HookPresenceForPendingFlush()
     {
-        if (_localNetworkScanner == null || _presenceHooked)
+        if (_presenceHooked)
             return;
-        _localNetworkScanner.ClientsChanged += OnLanClientsChangedForPendingFlush;
-        _localNetworkScanner.DiscoveryPingReceived += OnDiscoveryPingForPendingFlush;
+        if (_localNetworkScanner != null)
+        {
+            _localNetworkScanner.ClientsChanged += OnLanClientsChangedForPendingFlush;
+            _localNetworkScanner.DiscoveryPingReceived += OnDiscoveryPingForPendingFlush;
+        }
+
+        var hostTransports = _runtime.AdditionalTransports;
+        if (hostTransports != null)
+            hostTransports.PeerPresenceSeen += OnHostTransportPresenceForPendingFlush;
+
         _presenceHooked = true;
     }
 
@@ -1336,10 +1344,18 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         ClearPendingOutgoing();
 
-        if (!_presenceHooked || _localNetworkScanner == null)
+        if (!_presenceHooked)
             return;
-        _localNetworkScanner.ClientsChanged -= OnLanClientsChangedForPendingFlush;
-        _localNetworkScanner.DiscoveryPingReceived -= OnDiscoveryPingForPendingFlush;
+        if (_localNetworkScanner != null)
+        {
+            _localNetworkScanner.ClientsChanged -= OnLanClientsChangedForPendingFlush;
+            _localNetworkScanner.DiscoveryPingReceived -= OnDiscoveryPingForPendingFlush;
+        }
+
+        var hostTransports = _runtime.AdditionalTransports;
+        if (hostTransports != null)
+            hostTransports.PeerPresenceSeen -= OnHostTransportPresenceForPendingFlush;
+
         _presenceHooked = false;
     }
 
@@ -1408,7 +1424,28 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         if (!HasPendingOutgoing())
             return;
-        if (!_localNetworkScanner!.IsPeerSeenRecentlyOnLan(_chat.PeerNetworkIdShort))
+        // Peer is back online when seen on LAN or on a host transport (e.g. mesh presence within the freshness window).
+        if (!_localNetworkScanner!.IsPeerSeenRecentlyOnLan(_chat.PeerNetworkIdShort) && !IsPeerSeenOnHostTransport())
+            return;
+        StartFlushPendingInBackground();
+    }
+
+    /// <summary>Mesh/LoRa peers ping once per minute: treat a peer seen by the host transport as online.</summary>
+    private bool IsPeerSeenOnHostTransport()
+    {
+        var peerShort = _chat.PeerNetworkIdShort?.Trim();
+        if (string.IsNullOrWhiteSpace(peerShort))
+            return false;
+        return _runtime.AdditionalTransports?.IsPeerRecentlySeen(peerShort) == true;
+    }
+
+    private void OnHostTransportPresenceForPendingFlush(object? sender, string peerNetworkIdShort)
+    {
+        if (!HasPendingOutgoing())
+            return;
+        if (string.IsNullOrWhiteSpace(_chat.PeerNetworkIdShort))
+            return;
+        if (!ChatRepository.PeerNetworkIdsEqual(peerNetworkIdShort, _chat.PeerNetworkIdShort))
             return;
         StartFlushPendingInBackground();
     }
