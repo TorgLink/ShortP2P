@@ -545,6 +545,11 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
             if (from.Kind == TransportKind.Bluetooth) return true;
 
+            // Host transports (e.g. LoRa/Meshtastic): same spirit as BLE — accept when enabled so
+            // session setup can complete before MeshDirectory → chat endpoints sync catches up.
+            if (from.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+                return true;
+
             if (!string.IsNullOrEmpty(_chat.RelayRouteBlob))
                 return true;
         }
@@ -569,6 +574,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
             RebuildRouteFromChat();
             AdoptStoredDeliveryPath();
+            // Pull LoRa/mesh addresses early so leader 0x01 and follower 0x04 can leave on radio
+            // even when UDP still looks locally "up".
+            MergeAdditionalTransportPeerAddresses();
             LogSessionRoleContext("P2P session starting");
             _startInProgress = true;
             RefreshHandshakeStatus();
@@ -646,11 +654,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
             else if (_deliveryPath == ChatDeliveryPath.Mesh)
             {
                 _udpFallbackApplied = 1;
+                // Prefer LoRa/mesh endpoints so 0x04/0x01 leave on radio when UDP is down.
+                MergeAdditionalTransportPeerAddresses();
+                PreferAdditionalTransportEndpoint();
             }
             else if (udpUnavailable)
             {
                 _logger.LogWarning(
-                    "Chat {ChatId}: error while establishing connection by UDP; trying BLE and messenger server",
+                    "Chat {ChatId}: error while establishing connection by UDP; trying BLE, host transports (LoRa), and messenger server",
                     _chat.Id);
                 await TryApplyUdpUnavailableWorkaroundAsync(cancellationToken, flushUnsent: false)
                     .ConfigureAwait(false);
@@ -670,7 +681,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             if (_deliveryPath == ChatDeliveryPath.Auto && !udpUnavailable && IsUdpConnectionUnavailable())
             {
                 _logger.LogWarning(
-                    "Chat {ChatId}: error while establishing connection by UDP; trying BLE and messenger server",
+                    "Chat {ChatId}: error while establishing connection by UDP; trying BLE, host transports (LoRa), and messenger server",
                     _chat.Id);
                 await TryApplyUdpUnavailableWorkaroundAsync(cancellationToken, flushUnsent: false)
                     .ConfigureAwait(false);
@@ -681,15 +692,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 _ = TryConfirmCryptoSessionAsync(cancellationToken);
             else
             {
-                // Nudge leader once; do not start a probe/retry loop on the follower.
-                try
-                {
-                    await SendSessionSetupRequestPacketAsync(cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Chat {ChatId}: follower 0x04 nudge on start failed", _chat.Id);
-                }
+                // LoRa is lossy and the leader may come up later — nudge a few times, then stop.
+                _ = NudgeLeaderSessionSetupAsync(_cts?.Token ?? cancellationToken);
             }
 
             HookPresenceForPendingFlush();
@@ -2508,12 +2512,13 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     /// <summary>
     ///     Отправка «сырых» пакетов handshake (0x01/0x04) на пира. Перебирает peer endpoints
-    ///     в порядке предпочтения (свежий <c>_peerAddress</c> первым), останавливается на первом успешном.
-    ///     Маршрут UDP идёт через общий data-сокет в <see cref="UserP2pRuntime" />, BT — через общий BT-транспорт.
+    ///     в порядке предпочтения и шлёт на <b>все</b> готовые транспорты (UDP + BLE + LoRa).
+    ///     UDP SendAsync часто «успешен» в никуда; early-return оставлял LoRa без 0x01/0x04.
     /// </summary>
     private async ValueTask SendRouteRawAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken)
     {
         Exception? last = null;
+        var anySuccess = false;
         foreach (var dest in BuildOrderedDirectPeerAddresses())
         {
             var transport = ResolveOutbound(dest);
@@ -2522,7 +2527,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             try
             {
                 await transport.SendAsync(packet, dest, cancellationToken).ConfigureAwait(false);
-                return;
+                anySuccess = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2532,7 +2537,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             }
         }
 
-        if (last != null)
+        if (!anySuccess && last != null)
             throw last;
     }
 
@@ -2578,6 +2583,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         }
 
+        PreferEndpoint(remoteAddress);
         await HandleResponderHandshakeAsync(body.ToArray(), cancellationToken).ConfigureAwait(false);
     }
 
@@ -2592,7 +2598,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         }
 
-        if (body.Length != 1 + CompressedNetworkId.WireLength)
+        // Body is payload after the 0x04 marker (see DataPortMultiplexer Slice(1)).
+        if (body.Length != CompressedNetworkId.WireLength)
         {
             _logger.LogWarning(
                 "Chat {ChatId}: ignored session setup request from {Remote}, invalid body length {Length}",
@@ -2600,7 +2607,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         }
 
-        var peerId = CompressedNetworkId.FromWireBytes(body.Span.Slice(1, CompressedNetworkId.WireLength));
+        var peerId = CompressedNetworkId.FromWireBytes(body.Span);
         var expected = CompressedNetworkId.FromShortString(_chat.PeerNetworkIdShort.Trim());
         if (peerId != expected)
         {
@@ -2610,6 +2617,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         }
 
+        // Reply on the same path the nudge arrived on (e.g. LoRa when UDP is dead).
+        PreferEndpoint(remoteAddress);
         _logger.LogInformation(
             "Chat {ChatId}: accepted session setup request from {Remote}, sending RSA handshake",
             _chat.Id, FormatTransportAddress(remoteAddress));
@@ -2888,6 +2897,55 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (!id.TryWriteBytes(buf.AsSpan(1, CompressedNetworkId.WireLength)))
             throw new InvalidOperationException("Failed to write network id.");
         await SendRouteRawAsync(buf, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    ///     Follower: send 0x04 a few times while waiting for the leader's 0x01.
+    ///     LoRa is lossy; a single nudge at start is often not enough.
+    /// </summary>
+    private async Task NudgeLeaderSessionSetupAsync(CancellationToken cancellationToken)
+    {
+        // Immediate + 2s + 5s + 12s ≈ four attempts over ~20s.
+        int[] delaysMs = [0, 2000, 5000, 12000];
+        for (var i = 0; i < delaysMs.Length; i++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+            if (IsFollowerCryptoReady())
+                return;
+
+            if (delaysMs[i] > 0)
+            {
+                try
+                {
+                    await Task.Delay(delaysMs[i], cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+            }
+
+            if (IsFollowerCryptoReady())
+                return;
+
+            // Refresh mesh endpoints before each nudge — directory may learn the peer mid-flight.
+            MergeAdditionalTransportPeerAddresses();
+            PreferAdditionalTransportEndpoint();
+
+            try
+            {
+                await SendSessionSetupRequestPacketAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Chat {ChatId}: follower 0x04 nudge {Attempt} failed", _chat.Id, i + 1);
+            }
+        }
     }
 
     /// <summary>
@@ -3201,27 +3259,116 @@ public sealed class ChatP2PSession : IAsyncDisposable
     }
 
     /// <summary>
-    ///     SHO-10 workaround. UDP did not come up: try BLE when it is enabled and the peer is reachable
-    ///     over it, and independently pin the chat to an available messenger server that lists this subscriber.
-    ///     Send prefers that server (existing server-first delivery); receive stays on the server long-poll.
-    ///     When both paths are up, server delivery still wins if the peer is registered there; BLE is the P2P path.
+    ///     SHO-10 / TRL-30 workaround. UDP did not come up: try BLE and host transports (e.g. LoRa)
+    ///     when enabled and the peer is reachable there, and independently pin the chat to an available
+    ///     messenger server that lists this subscriber. Send prefers that server (existing server-first
+    ///     delivery); receive stays on the server long-poll. When both paths are up, server delivery still
+    ///     wins if the peer is registered there; BLE/LoRa remain the P2P paths.
     /// </summary>
     private async Task TryApplyUdpUnavailableWorkaroundAsync(CancellationToken cancellationToken, bool flushUnsent)
     {
-        if (!AllowsAutomaticServerFallback(_deliveryPath))
-        {
-            Interlocked.Exchange(ref _udpFallbackApplied, 1);
-            return;
-        }
-
         if (Interlocked.Exchange(ref _udpFallbackApplied, 1) == 1)
             return;
 
         _udpOutboundUnavailable = true;
-        await TryServerFallbackAsync(cancellationToken).ConfigureAwait(false);
+        if (AllowsAutomaticServerFallback(_deliveryPath))
+            await TryServerFallbackAsync(cancellationToken).ConfigureAwait(false);
         await TryBleFallbackAsync(cancellationToken).ConfigureAwait(false);
+        await TryAdditionalTransportFallbackAsync(cancellationToken).ConfigureAwait(false);
         if (flushUnsent)
             await EnqueueLatestUnsentMessagesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task TryAdditionalTransportFallbackAsync(CancellationToken cancellationToken)
+    {
+        MergeAdditionalTransportPeerAddresses();
+        if (!PreferAdditionalTransportEndpoint())
+        {
+            _logger.LogInformation(
+                "Chat {ChatId}: host-transport fallback skipped (no enabled LoRa/mesh endpoint for peer)",
+                _chat.Id);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Chat {ChatId}: UDP unavailable, preferring host transport {Endpoint} for session setup",
+            _chat.Id, FormatTransportAddress(_peerAddress!));
+
+        if (!IsCryptoSessionLeader())
+            return;
+
+        try
+        {
+            await SendChatInviteAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Chat {ChatId}: host-transport invite during UDP fallback failed", _chat.Id);
+        }
+    }
+
+    /// <summary>
+    ///     Pull MeshDirectory / host-transport addresses for this peer into the live route so session
+    ///     setup can leave on LoRa even before chat-row endpoint sync lands.
+    /// </summary>
+    private void MergeAdditionalTransportPeerAddresses()
+    {
+        var provider = _runtime.AdditionalTransports;
+        var peerShort = _chat.PeerNetworkIdShort?.Trim();
+        if (provider == null || string.IsNullOrWhiteSpace(peerShort))
+            return;
+
+        IReadOnlyList<TransportAddress> extras;
+        try
+        {
+            extras = provider.GetPeerAddresses(peerShort);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: GetPeerAddresses failed", _chat.Id);
+            return;
+        }
+
+        if (extras.Count == 0)
+            return;
+
+        foreach (var ep in extras)
+        {
+            if (!IsTransportEnabled(ep.Kind))
+                continue;
+            if (_peerEndpoints.Any(x => x.Kind == ep.Kind && x.Data.AsSpan().SequenceEqual(ep.Data)))
+                continue;
+            _peerEndpoints.Add(ep);
+        }
+    }
+
+    /// <returns>True when a non-UDP/BT host endpoint was promoted to primary.</returns>
+    private bool PreferAdditionalTransportEndpoint()
+    {
+        TransportAddress? preferred = null;
+        foreach (var ep in _peerEndpoints)
+        {
+            if (ep.Kind is TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer)
+                continue;
+            if (!IsOutboundTransportReady(ep.Kind))
+                continue;
+            preferred = ep;
+            break;
+        }
+
+        if (preferred == null)
+            return false;
+
+        PreferEndpoint(preferred);
+        return true;
+    }
+
+    private void PreferEndpoint(TransportAddress endpoint)
+    {
+        _peerAddress = endpoint;
+        _peerEndpoints.RemoveAll(ep =>
+            ep.Kind == endpoint.Kind && ep.Data.AsSpan().SequenceEqual(endpoint.Data));
+        _peerEndpoints.Insert(0, endpoint);
     }
 
     private async Task TryBleFallbackAsync(CancellationToken cancellationToken)
@@ -3295,11 +3442,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         if (!TryGetPeerBluetoothMac(out var mac))
             return;
-        var ble = BluetoothTransportAddress.FromMac(mac);
-        _peerAddress = ble;
-        _peerEndpoints.RemoveAll(ep =>
-            ep.Kind == TransportKind.Bluetooth && ep.Data.AsSpan().SequenceEqual(ble.Data));
-        _peerEndpoints.Insert(0, ble);
+        PreferEndpoint(BluetoothTransportAddress.FromMac(mac));
     }
 
     private async Task EnqueueLatestUnsentMessagesAsync(CancellationToken cancellationToken, bool startWorker = true)
@@ -3439,7 +3582,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
         await PersistDeliveryPathAsync().ConfigureAwait(false);
         RebuildRouteFromChat();
         RaiseActiveChannelChanged();
-        _logger.LogInformation("Chat {ChatId}: manual switch to mesh (UDP/BLE); reset session and re-invite",
+        MergeAdditionalTransportPeerAddresses();
+        PreferAdditionalTransportEndpoint();
+        _logger.LogInformation("Chat {ChatId}: manual switch to mesh (UDP/BLE/LoRa); reset session and re-invite",
             _chat.Id);
 
         await ResetCryptoStateAsync(cancellationToken).ConfigureAwait(false);

@@ -1,3 +1,4 @@
+using ShortP2P.Auth.Data;
 using ShortP2P.Transport;
 using ShortP2P.Transport.Abstractions;
 
@@ -84,7 +85,9 @@ public sealed class DataPortMultiplexer : IAsyncDisposable
             case (byte)HandshakeKind.Handshake when msg.Payload.Length == 129:
                 Handshake.HandleIncoming(HandshakeKind.Handshake, msg.Payload.Slice(1), msg.RemoteAddress);
                 return;
-            case (byte)HandshakeKind.SessionSetupRequest when msg.Payload.Length == 17:
+            // 0x04 + CompressedNetworkId wire bytes (12). Hardcoded 17 was left over from Guid-sized ids.
+            case (byte)HandshakeKind.SessionSetupRequest
+                when msg.Payload.Length == 1 + CompressedNetworkId.WireLength:
                 Handshake.HandleIncoming(HandshakeKind.SessionSetupRequest, msg.Payload.Slice(1), msg.RemoteAddress);
                 return;
             case MessageTransceiver.FrameCipher when msg.Payload.Length > 1:

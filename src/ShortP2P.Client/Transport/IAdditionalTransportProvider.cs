@@ -29,6 +29,12 @@ public interface IAdditionalTransportProvider
     /// </summary>
     bool IsPeerRecentlySeen(string networkIdShort);
 
+    /// <summary>
+    ///     Known outbound addresses for a peer on this provider (e.g. Meshtastic MeshIds from the
+    ///     directory). Empty when the peer is unknown or the transport is stopped.
+    /// </summary>
+    IReadOnlyList<TransportAddress> GetPeerAddresses(string networkIdShort);
+
     /// <summary>Raised with the peer NetworkId (short form) when a keep-alive/presence from it arrives.</summary>
     event EventHandler<string>? PeerPresenceSeen;
 }
