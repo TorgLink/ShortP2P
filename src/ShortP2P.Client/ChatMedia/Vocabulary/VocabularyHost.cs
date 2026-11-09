@@ -39,19 +39,25 @@ public static class VocabularyHost
     {
         logger ??= NullLogger.Instance;
         if (VocabularyCatalog.IsInitialized)
+        {
+            logger.LogInformation("VocabularyHost: catalog already initialized; skip copy from {Src}", packsDirectory);
             return VocabularyCatalog.Instance;
+        }
 
         Directory.CreateDirectory(cacheDirectory);
         var copied = 0;
-        foreach (var zip in Directory.EnumerateFiles(packsDirectory, "*_vocabulary_v*.zip"))
+        foreach (var zip in Directory.EnumerateFiles(packsDirectory, "*_vocabulary_v*.zip")
+                     .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
         {
-            var dest = Path.Combine(cacheDirectory, Path.GetFileName(zip));
+            var name = Path.GetFileName(zip);
+            var dest = Path.Combine(cacheDirectory, name);
             File.Copy(zip, dest, overwrite: true);
             copied++;
+            logger.LogInformation("VocabularyHost: copied {File} → {Dest}", name, dest);
         }
 
         logger.LogInformation(
-            "VocabularyHost: copied {Count} packs from {Src} → {Dst}",
+            "VocabularyHost: copied {Count} pack(s) from {Src} → {Dst}",
             copied, packsDirectory, cacheDirectory);
         return VocabularyCatalog.Initialize(cacheDirectory, logger);
     }
@@ -61,7 +67,13 @@ public static class VocabularyHost
     {
         logger ??= NullLogger.Instance;
         if (VocabularyCatalog.IsInitialized)
+        {
+            logger.LogInformation("VocabularyHost: catalog already initialized");
             return true;
+        }
+
+        logger.LogInformation("VocabularyHost: searching for ShortP2P.Vocabulary from {Base}",
+            AppContext.BaseDirectory);
         var packs = FindPacksDirectory();
         if (packs == null)
         {
@@ -69,6 +81,7 @@ public static class VocabularyHost
             return false;
         }
 
+        logger.LogInformation("VocabularyHost: found packs directory {Dir}", packs);
         InitializeFromPacksDirectory(packs, cacheDirectory, logger);
         return true;
     }

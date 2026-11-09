@@ -33,34 +33,51 @@ public sealed class VocabularyCatalog
         lock (Gate)
         {
             if (_instance != null)
+            {
+                logger.LogInformation(
+                    "Vocabulary catalog already initialized ({Count} pack(s)); skip reload of {Dir}",
+                    _instance._packs.Count, directory);
                 return _instance;
+            }
 
+            logger.LogInformation("Vocabulary: scanning packs in {Dir}", directory);
             var packs = new List<VocabularyPack>();
             if (Directory.Exists(directory))
             {
-                foreach (var path in Directory.EnumerateFiles(directory, "*_vocabulary_v*.zip",
-                             SearchOption.TopDirectoryOnly))
+                var zips = Directory.EnumerateFiles(directory, "*_vocabulary_v*.zip",
+                    SearchOption.TopDirectoryOnly).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+                logger.LogInformation("Vocabulary: found {Count} zip(s) in {Dir}", zips.Count, directory);
+                foreach (var path in zips)
                 {
                     try
                     {
+                        logger.LogInformation("Vocabulary: loading {File}…", Path.GetFileName(path));
                         var pack = VocabularyZipLoader.Load(path);
                         packs.Add(pack);
                         logger.LogInformation(
-                            "Loaded vocabulary {Lang} v{Version} ({Tokens} tokens, blake3={Hash})",
-                            pack.Language, pack.Version, pack.IdToWord.Count, pack.Blake3Hex);
+                            "Vocabulary: loaded {Lang} v{Version} — {Tokens} tokens, blake3={Hash}, file={File}",
+                            pack.Language, pack.Version, pack.IdToWord.Count, pack.Blake3Hex,
+                            Path.GetFileName(path));
                     }
                     catch (Exception ex)
                     {
-                        logger.LogWarning(ex, "Failed to load vocabulary zip {Path}", path);
+                        logger.LogWarning(ex, "Vocabulary: failed to load zip {Path}", path);
                     }
                 }
             }
             else
             {
-                logger.LogWarning("Vocabulary directory missing: {Dir}", directory);
+                logger.LogWarning("Vocabulary: directory missing: {Dir}", directory);
             }
 
             _instance = new VocabularyCatalog(packs, logger);
+            if (packs.Count == 0)
+                logger.LogWarning("Vocabulary: catalog empty after scan of {Dir}", directory);
+            else
+                logger.LogInformation(
+                    "Vocabulary: catalog ready — {Count} pack(s): {Summary}",
+                    packs.Count,
+                    string.Join(", ", packs.Select(p => $"{p.Language}v{p.Version}")));
             return _instance;
         }
     }
