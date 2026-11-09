@@ -45,6 +45,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
     public const int UdpFallbackLatestUnsentCount = 20;
     private static readonly TimeSpan DecryptRecoveryCooldown = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan InviteResyncCooldown = TimeSpan.FromSeconds(3);
+    /// <summary>Successful encrypted TX ACK / inbound decrypt keeps AES across missed crypto probes.</summary>
+    private static readonly TimeSpan EncryptedPathProofFreshness = TimeSpan.FromSeconds(120);
     private readonly SemaphoreSlim _cryptoProbeLoopLock = new(1, 1);
     private readonly P2pCryptoSessionCache _cryptoSessionCache;
     private readonly SemaphoreSlim _flushPendingSem = new(1, 1);
@@ -95,6 +97,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private static readonly TimeSpan LeaderHandshakeResendMinInterval = TimeSpan.FromSeconds(15);
 
     private DateTimeOffset _lastDecryptRecoveryUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastEncryptedPathProofUtc = DateTimeOffset.MinValue;
     private MessengerService? _messenger;
     private CancellationTokenSource? _outboundCts;
 
@@ -1105,6 +1108,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         var shouldNotify = false;
         if (ChatWireCodec.TryParse(payload, out var wire) && wire != null)
         {
+            // Reaching plaintext wire means AES decrypt already succeeded on this path.
+            NoteEncryptedPathProof(cancellationToken);
             switch (wire)
             {
                 case ChatWireText t:
@@ -2087,6 +2092,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         .ConfigureAwait(false);
                     RaiseMessagesChanged();
                     await _messenger.SendBinaryAsyncExpectAck(wire, dests, ct).ConfigureAwait(false);
+                    NoteEncryptedPathProof(ct);
                     _logger.LogInformation(
                         "Chat {ChatId}: delivery ACK received for message {MessageId}",
                         _chat.Id, messageId);
@@ -2097,6 +2103,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         "Chat {ChatId}: P2P relay send message {MessageId} via {Endpoint}",
                         _chat.Id, messageId, FormatTransportAddress(_peerAddress!));
                     await _messenger.SendBinaryAsync(wire, _peerAddress!, ct).ConfigureAwait(false);
+                    NoteEncryptedPathProof(ct);
                 }
             },
             null,
@@ -2148,6 +2155,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 {
                     await _messenger.SendBinaryAsync(wire, _peerAddress!, ct).ConfigureAwait(false);
                 }
+
+                NoteEncryptedPathProof(ct);
             },
             null,
             false,
@@ -2191,6 +2200,13 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         var firstTime = !_cryptoProbeRoundTripOk;
         _cryptoProbeRoundTripOk = true;
+        _lastEncryptedPathProofUtc = DateTimeOffset.UtcNow;
+        lock (_sync)
+        {
+            // Unblock an in-flight test_send waiter when proof arrives via delivery ACK / inbound decrypt.
+            _cryptoProbeOkAwaiter?.TrySetResult(true);
+        }
+
         RefreshHandshakeStatus();
         if (!firstTime || _userInfoSharedAfterEstablish)
             return;
@@ -2198,6 +2214,27 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _ = ShareLocalUserInfoAfterEstablishAsync(cancellationToken);
         _ = ShareVocabOfferAfterEstablishAsync(cancellationToken);
     }
+
+    /// <summary>
+    ///     Live encrypted traffic (peer delivery ACK or decrypted inbound) proves the AES path.
+    ///     On LoRa the dedicated crypto probe is often lost to duty-cycle/chunking; do not wipe keys
+    ///     while this proof is fresh.
+    /// </summary>
+    private void NoteEncryptedPathProof(CancellationToken cancellationToken)
+    {
+        _lastEncryptedPathProofUtc = DateTimeOffset.UtcNow;
+        if (_cryptoProbeRoundTripOk)
+            return;
+        if (!_handshakeWeInitiated && !TryGetCryptoSession(out _))
+            return;
+        MarkCryptoSessionEstablished(cancellationToken);
+        _logger.LogInformation(
+            "Chat {ChatId}: crypto session confirmed via live encrypted traffic (role={Role})",
+            _chat.Id, SessionRoleLabel());
+    }
+
+    private bool HasFreshEncryptedPathProof() =>
+        DateTimeOffset.UtcNow - _lastEncryptedPathProofUtc < EncryptedPathProofFreshness;
 
     private async Task ShareLocalUserInfoAfterEstablishAsync(CancellationToken cancellationToken)
     {
@@ -2804,6 +2841,46 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _logger.LogWarning("Chat {ChatId}: decrypt failure, starting crypto recovery (role={Role})",
                 _chat.Id, SessionRoleLabel());
 
+            // Live ACKs/decrypts prove the current AES path; a lone bad frame (often stale after
+            // LoRa reordering) must not wipe keys the peer is still using successfully.
+            if (HasFreshEncryptedPathProof() && TryGetCryptoSession(out _) && _messenger != null)
+            {
+                _logger.LogInformation(
+                    "Chat {ChatId}: decrypt failure soft recovery — keeping AES (fresh encrypted path proof)",
+                    _chat.Id);
+                if (!IsCryptoSessionLeader())
+                {
+                    try
+                    {
+                        await SendSessionSetupRequestPacketAsync(token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Chat {ChatId}: follower 0x04 after decrypt failure failed", _chat.Id);
+                    }
+
+                    return;
+                }
+
+                byte[]? softResend;
+                lock (_sync)
+                    softResend = _lastLeaderHandshakeFrame is { Length: > 0 } frame ? frame : null;
+                if (softResend != null)
+                {
+                    try
+                    {
+                        _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
+                        await SendRouteRawAsync(softResend, token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Chat {ChatId}: leader soft 0x01 after decrypt failure failed", _chat.Id);
+                    }
+
+                    return;
+                }
+            }
+
             await ResetCryptoStateAsync(token).ConfigureAwait(false);
             if (!IsCryptoSessionLeader())
             {
@@ -2856,6 +2933,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _handshakeWeInitiated = false;
             _cryptoProbeRoundTripOk = false;
             _userInfoSharedAfterEstablish = false;
+            _lastEncryptedPathProofUtc = DateTimeOffset.MinValue;
             _messenger = null;
             _pendingInboundCipher = null;
             _pendingInboundCipherFrom = null;
@@ -3229,6 +3307,21 @@ public sealed class ChatP2PSession : IAsyncDisposable
                             _chat.Id, softProbeRetries, maxSoftProbeRetries);
                         _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
                         await SendRouteRawAsync(softResend, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Probe ACKs are often lost on LoRa while chat ACKs still succeed — keep AES.
+                    if (HasFreshEncryptedPathProof()
+                        && TryGetCryptoSession(out _)
+                        && _messenger != null
+                        && _lastLeaderHandshakeFrame is { Length: > 0 } keepFrame)
+                    {
+                        _logger.LogInformation(
+                            "Chat {ChatId}: crypto probe hard reset skipped — fresh encrypted path proof; soft-resending 0x01",
+                            _chat.Id);
+                        _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
+                        await SendRouteRawAsync(keepFrame, cancellationToken).ConfigureAwait(false);
+                        softProbeRetries = 0;
                         continue;
                     }
 
