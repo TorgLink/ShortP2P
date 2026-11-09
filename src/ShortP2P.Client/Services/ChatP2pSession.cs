@@ -80,6 +80,19 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// <summary>True только у лидера (меньший NetworkId): отправлен свой RSA-handshake; test_send только с лидера.</summary>
     private bool _handshakeWeInitiated;
 
+    /// <summary>Leader: last TX 0x01 frame (129 bytes). Resent on duplicate 0x04 without rotating AES keys.</summary>
+    private byte[]? _lastLeaderHandshakeFrame;
+
+    /// <summary>Follower: last accepted 0x01 payload (128 bytes) so identical LoRa resends don't rebuild the session.</summary>
+    private byte[]? _lastAcceptedHandshakePayload;
+
+    /// <summary>Inbound cipher held while local messenger/session is not ready (LoRa chunk trains often outrun handshake).</summary>
+    private byte[]? _pendingInboundCipher;
+    private TransportAddress? _pendingInboundCipherFrom;
+
+    private DateTimeOffset _lastLeaderHandshakeSentUtc = DateTimeOffset.MinValue;
+    private static readonly TimeSpan LeaderHandshakeResendMinInterval = TimeSpan.FromSeconds(15);
+
     private DateTimeOffset _lastDecryptRecoveryUtc = DateTimeOffset.MinValue;
     private MessengerService? _messenger;
     private CancellationTokenSource? _outboundCts;
@@ -296,6 +309,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     private void ClearCryptoSession()
     {
+        _lastLeaderHandshakeFrame = null;
+        _lastAcceptedHandshakePayload = null;
         if (_cryptoSessionCache.TryRemove(_chat.Id, out _))
             _logger.LogInformation("Chat {ChatId}: crypto session cleared from cache (role={Role})", _chat.Id,
                 SessionRoleLabel());
@@ -890,21 +905,33 @@ public sealed class ChatP2PSession : IAsyncDisposable
             "Chat {ChatId}: RX cipher {Bytes} bytes from {Remote}",
             _chat.Id, msg.Payload.Length, FormatTransportAddress(msg.RemoteAddress));
         TryRememberAdditionalPeer(msg.RemoteAddress);
-        var messenger = _messenger;
+        MessengerService? messenger;
+        lock (_sync)
+        {
+            messenger = _messenger;
+            if (messenger == null || !TryGetCryptoSession(out _))
+            {
+                _pendingInboundCipher = msg.Payload.ToArray();
+                _pendingInboundCipherFrom = msg.RemoteAddress;
+                _logger.LogWarning(
+                    "Chat {ChatId}: buffered inbound cipher ({Bytes} bytes) — messenger/crypto session not ready; nudging handshake",
+                    _chat.Id, msg.Payload.Length);
+                messenger = null;
+            }
+        }
+
         if (messenger == null)
         {
-            _logger.LogWarning(
-                "Chat {ChatId}: dropped inbound cipher — messenger/crypto session not ready; nudging handshake",
-                _chat.Id);
             NudgeCryptoAfterInboundWithoutSession();
             return;
         }
 
         messenger.TryAcceptCipher(msg);
+        TryFlushPendingInboundCipher();
     }
 
     /// <summary>
-    ///     Cipher arrived before local AES keys: follower re-asks 0x04; leader re-drives 0x01.
+    ///     Cipher arrived before local AES keys: buffer it, follower re-asks 0x04, leader re-drives 0x01.
     ///     Common on LoRa when handshake chunks timed out but a later cipher chunk train completed.
     /// </summary>
     private void NudgeCryptoAfterInboundWithoutSession()
@@ -913,9 +940,50 @@ public sealed class ChatP2PSession : IAsyncDisposable
         PreferAdditionalTransportEndpoint();
         var token = _cts?.Token ?? CancellationToken.None;
         if (IsCryptoSessionLeader())
-            _ = TryConfirmCryptoSessionAsync(token);
+            _ = EnsureLeaderAfterInboundCipherAsync(token);
         else
             _ = SendSessionSetupRequestQuietAsync(token);
+    }
+
+    private async Task EnsureLeaderAfterInboundCipherAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // After probe ResetCryptoState, TryConfirm alone is a no-op (_handshakeWeInitiated=false, messenger=null).
+            await EnsureSessionAsInitiatorAsync(cancellationToken).ConfigureAwait(false);
+            TryFlushPendingInboundCipher();
+            await TryConfirmCryptoSessionAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // shutting down
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: leader session nudge after inbound cipher failed", _chat.Id);
+        }
+    }
+
+    private void TryFlushPendingInboundCipher()
+    {
+        byte[]? pending;
+        TransportAddress? from;
+        MessengerService? messenger;
+        lock (_sync)
+        {
+            pending = _pendingInboundCipher;
+            from = _pendingInboundCipherFrom;
+            messenger = _messenger;
+            if (pending == null || from == null || messenger == null || !TryGetCryptoSession(out _))
+                return;
+            _pendingInboundCipher = null;
+            _pendingInboundCipherFrom = null;
+        }
+
+        _logger.LogInformation(
+            "Chat {ChatId}: flushing buffered inbound cipher ({Len} bytes)",
+            _chat.Id, pending.Length);
+        messenger.TryAcceptCipher(new TransportReceiveMessage(pending, from));
     }
 
     private async Task SendSessionSetupRequestQuietAsync(CancellationToken cancellationToken)
@@ -2549,6 +2617,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _cryptoProbeRoundTripOk = false;
             _userInfoSharedAfterEstablish = false;
             _messenger = null;
+            _pendingInboundCipher = null;
+            _pendingInboundCipherFrom = null;
         }
 
         ClearCryptoSession();
@@ -2816,6 +2886,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 "Chat {ChatId}: starting crypto probe round-trip confirmation (role={Role})",
                 _chat.Id, SessionRoleLabel());
             var okWait = TimeSpan.FromSeconds(60);
+            var softProbeRetries = 0;
+            const int maxSoftProbeRetries = 2;
 
             while (!cancellationToken.IsCancellationRequested && !_cryptoProbeRoundTripOk)
             {
@@ -2893,6 +2965,34 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
                 try
                 {
+                    // LoRa/host: probe ACK is often lost to duty-cycle/chunking. Keep AES keys and re-TX 0x01
+                    // instead of wiping a session the follower may already be using to encrypt chat.
+                    byte[]? softResend = null;
+                    lock (_sync)
+                    {
+                        if (softProbeRetries < maxSoftProbeRetries
+                            && _runtime.AdditionalTransports != null
+                            && TryGetCryptoSession(out _)
+                            && _messenger != null
+                            && _lastLeaderHandshakeFrame is { Length: > 0 } frame)
+                        {
+                            softResend = frame;
+                        }
+                    }
+
+                    if (softResend != null)
+                    {
+                        softProbeRetries++;
+                        _logger.LogInformation(
+                            "Chat {ChatId}: crypto probe soft retry {Attempt}/{Max} — resend cached 0x01 without resetting keys",
+                            _chat.Id, softProbeRetries, maxSoftProbeRetries);
+                        _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
+                        await SendRouteRawAsync(softResend, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    softProbeRetries = 0;
+
                     await ResetCryptoStateAsync(cancellationToken).ConfigureAwait(false);
                     if (_deliveryPath != ChatDeliveryPath.Server)
                         await SendChatInviteWithRetryAsync(cancellationToken).ConfigureAwait(false);
@@ -3090,67 +3190,100 @@ public sealed class ChatP2PSession : IAsyncDisposable
     ///     Leader crypto setup: holds <see cref="_sessionSetup" /> only for local state mutation.
     ///     Handshake bytes are sent after release so inbound 0x01/0x04/cipher are not starved.
     /// </summary>
-    /// <param name="forceSendHandshake">Ответ на 0x04 от follower — всегда шлём 0x01, даже если сессия в кэше.</param>
+    /// <param name="forceSendHandshake">Ответ на 0x04 от follower — шлём 0x01; при уже живой сессии — тот же пакет, без ротации ключей.</param>
     private async Task EnsureLeaderCryptoSessionCoreAsync(CancellationToken cancellationToken,
         bool forceSendHandshake = false)
     {
         byte[]? packetToSend = null;
         MessengerService? msToStart = null;
+        var resendCachedOnly = false;
 
         await _sessionSetup.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!forceSendHandshake)
-                lock (_sync)
-                {
-                    if (TryGetCryptoSession(out _) && _messenger != null)
-                    {
-                        _logger.LogDebug("Chat {ChatId}: leader crypto session already active, skip handshake",
-                            _chat.Id);
-                        return;
-                    }
-                }
-
-            if (_peerPublicKey == null)
-            {
-                _logger.LogWarning("Chat {ChatId}: cannot send leader handshake — peer public key missing",
-                    _chat.Id);
-                return;
-            }
-
-            _logger.LogInformation(
-                "Chat {ChatId}: leader sending RSA handshake (0x01), crypto role={Role}, BLE role={BleRole}, force={ForceSendHandshake}",
-                _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a", forceSendHandshake);
-            var hs = P2PCrypto.CreateHandshakeInitiation(_peerPublicKey);
-            var packet = new byte[129];
-            packet[0] = FrameHandshake;
-            Buffer.BlockCopy(hs.HandshakePacket, 0, packet, 1, hs.HandshakePacket.Length);
-
             lock (_sync)
             {
-                if (!forceSendHandshake && TryGetCryptoSession(out _) && _messenger != null)
-                    return;
-
-                if (forceSendHandshake)
-                    ClearCryptoSession();
-
-                _ = _cryptoSessionCache.GetSession(_chat.Id, () => hs.Session);
-                _logger.LogInformation("Chat {ChatId}: leader crypto session created in cache (role={Role})",
-                    _chat.Id,
-                    SessionRoleLabel());
-                if (_messenger == null)
+                var ready = TryGetCryptoSession(out _) && _messenger != null;
+                if (!forceSendHandshake && ready)
                 {
-                    _messenger =
-                        new MessengerService(SendCipherAsync, WaitForCryptoSessionAsync, CreateMessengerOptions(),
-                            OnDecryptFailureAsync);
-                    _messenger.GotData += OnMessengerGotData;
-                    msToStart = _messenger;
+                    _logger.LogDebug("Chat {ChatId}: leader crypto session already active, skip handshake",
+                        _chat.Id);
+                    return;
                 }
 
-                _handshakeWeInitiated = true;
+                // Duplicate 0x04 on LoRa: keep AES keys the follower already accepted; only re-TX the same 0x01.
+                if (forceSendHandshake && ready && _lastLeaderHandshakeFrame is { Length: > 0 } cached)
+                {
+                    var since = DateTimeOffset.UtcNow - _lastLeaderHandshakeSentUtc;
+                    if (since < LeaderHandshakeResendMinInterval)
+                    {
+                        _logger.LogDebug(
+                            "Chat {ChatId}: suppressing duplicate 0x01 resend (cooldown {Elapsed:F1}s < {Min:F0}s)",
+                            _chat.Id, since.TotalSeconds, LeaderHandshakeResendMinInterval.TotalSeconds);
+                        return;
+                    }
+
+                    packetToSend = cached;
+                    resendCachedOnly = true;
+                    _logger.LogInformation(
+                        "Chat {ChatId}: leader re-sending cached RSA handshake (0x01) without rotating keys, role={Role}",
+                        _chat.Id, SessionRoleLabel());
+                }
             }
 
-            packetToSend = packet;
+            if (!resendCachedOnly)
+            {
+                if (_peerPublicKey == null)
+                {
+                    _logger.LogWarning("Chat {ChatId}: cannot send leader handshake — peer public key missing",
+                        _chat.Id);
+                    return;
+                }
+
+                _logger.LogInformation(
+                    "Chat {ChatId}: leader sending RSA handshake (0x01), crypto role={Role}, BLE role={BleRole}, force={ForceSendHandshake}",
+                    _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a", forceSendHandshake);
+                var hs = P2PCrypto.CreateHandshakeInitiation(_peerPublicKey);
+                var packet = new byte[129];
+                packet[0] = FrameHandshake;
+                Buffer.BlockCopy(hs.HandshakePacket, 0, packet, 1, hs.HandshakePacket.Length);
+
+                lock (_sync)
+                {
+                    var ready = TryGetCryptoSession(out _) && _messenger != null;
+                    if (!forceSendHandshake && ready)
+                        return;
+
+                    // Race: session became ready with a cached frame while we built a new initiation — prefer cache.
+                    if (forceSendHandshake && ready && _lastLeaderHandshakeFrame is { Length: > 0 } cached)
+                    {
+                        packetToSend = cached;
+                    }
+                    else
+                    {
+                        // New keys only when there is no usable session yet (or after an explicit reset).
+                        if (ready || TryGetCryptoSession(out _))
+                            ClearCryptoSession();
+
+                        _ = _cryptoSessionCache.GetSession(_chat.Id, () => hs.Session);
+                        _lastLeaderHandshakeFrame = packet;
+                        _logger.LogInformation("Chat {ChatId}: leader crypto session created in cache (role={Role})",
+                            _chat.Id,
+                            SessionRoleLabel());
+                        if (_messenger == null)
+                        {
+                            _messenger =
+                                new MessengerService(SendCipherAsync, WaitForCryptoSessionAsync, CreateMessengerOptions(),
+                                    OnDecryptFailureAsync);
+                            _messenger.GotData += OnMessengerGotData;
+                            msToStart = _messenger;
+                        }
+
+                        _handshakeWeInitiated = true;
+                        packetToSend = packet;
+                    }
+                }
+            }
         }
         finally
         {
@@ -3158,13 +3291,21 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
 
         if (packetToSend != null)
+        {
+            _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
             await SendRouteRawAsync(packetToSend, cancellationToken).ConfigureAwait(false);
+        }
 
         if (msToStart != null)
         {
             await msToStart.StartAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("Chat {ChatId}: messenger started (crypto role={Role}, BLE role={BleRole})",
                 _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a");
+            TryFlushPendingInboundCipher();
+        }
+        else if (packetToSend != null)
+        {
+            TryFlushPendingInboundCipher();
         }
     }
 
@@ -3270,6 +3411,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _logger.LogInformation(
             "Chat {ChatId}: messenger started (crypto role={Role}, BLE role={BleRole}) from cached crypto session",
             _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a");
+        TryFlushPendingInboundCipher();
     }
 
     private MessengerOptions CreateMessengerOptions()
@@ -3303,10 +3445,23 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
             lock (_sync)
             {
+                // Identical 0x01 resend (leader keeps keys): do not rebuild session / reset messenger counters.
+                if (_lastAcceptedHandshakePayload != null
+                    && handshakePacket.AsSpan().SequenceEqual(_lastAcceptedHandshakePayload)
+                    && IsFollowerCryptoReadyCore())
+                {
+                    _logger.LogDebug(
+                        "Chat {ChatId}: ignoring identical RSA handshake resend; follower already ready",
+                        _chat.Id);
+                    SignalFollowerHandshakeSuccess();
+                    return;
+                }
+
                 ClearCryptoSession();
                 var localPrivate = _auth.GetCurrentPrivateKey();
                 _ = _cryptoSessionCache.GetSession(_chat.Id,
                     () => P2PCrypto.CreateSession(localPrivate, handshakePacket));
+                _lastAcceptedHandshakePayload = handshakePacket.ToArray();
                 _logger.LogInformation(
                     "Chat {ChatId}: crypto session created from handshake (role={Role})",
                     _chat.Id, SessionRoleLabel());
@@ -3335,6 +3490,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _logger.LogInformation("Chat {ChatId}: messenger started (crypto role={Role}, BLE role={BleRole})",
                 _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a");
         }
+
+        TryFlushPendingInboundCipher();
     }
 
     public async ValueTask StopAsync(CancellationToken cancellationToken = default)
