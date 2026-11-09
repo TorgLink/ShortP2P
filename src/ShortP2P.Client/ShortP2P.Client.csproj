@@ -39,12 +39,6 @@
     </ItemGroup>
 
     <ItemGroup>
-        <Content Include="ChatMedia\Vocabulary\Packs\*_vocabulary_v*.zip">
-            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        </Content>
-    </ItemGroup>
-
-    <ItemGroup>
         <Compile Remove="LocalNetwork\LocalNetworkScanner.cs" />
         <Compile Remove="LocalNetwork\LanBroadcastHelper.cs" />
         <Compile Remove="Qr\LocalIPv4Resolver.cs" />
