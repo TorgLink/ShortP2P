@@ -4,7 +4,8 @@ namespace ShortP2P.Client.ChatMedia.Vocabulary;
 
 /// <summary>
 ///     Bit-pack tokens as <c>CapitalFlag (1 bit) + tokenId (varint-ish fixed width)</c>.
-///     OOV runs: escape with tokenId = all-ones sentinel then UTF-8 length + bytes.
+///     Longest dictionary substring match wins. Unmatched runs stay uncompressed: OOV escape
+///     with tokenId = all-ones sentinel then UTF-8 length + bytes.
 /// </summary>
 public static class DictionaryTextCodec
 {
@@ -42,7 +43,7 @@ public static class DictionaryTextCodec
             if (matched)
                 continue;
 
-            // OOV: take one UTF-8 char (rune) as escape blob of remaining unmatched run up to next match or 64 bytes.
+            // OOV: unmatched run up to next dictionary match or 64 chars — sent uncompressed.
             var start = i;
             i++;
             while (i < text.Length)

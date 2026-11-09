@@ -87,6 +87,49 @@ public class VocabularyTests
     }
 
     [Fact]
+    public void Unmatched_Runs_Stay_Oov_With_Substring_Matches()
+    {
+        var dir = CreateTempPackDir(("EN", 1, [("0", "hell"), ("1", "world")]));
+        try
+        {
+            VocabularyCatalog.ResetForTests();
+            var pack = VocabularyCatalog.Initialize(dir).Packs[0];
+
+            // Longest substring: "hell" compresses; trailing "o" and "!" stay OOV uncompressed.
+            var mixed = DictionaryTextCodec.TryEncode("hello world!", pack);
+            Assert.NotNull(mixed);
+            Assert.True(DictionaryTextCodec.TryDecode(mixed, pack, out var decoded));
+            Assert.Equal("hello world!", decoded);
+        }
+        finally
+        {
+            VocabularyCatalog.ResetForTests();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void Mixed_Dict_And_Oov_RoundTrip()
+    {
+        var dir = CreateTempPackDir(("RU", 1, [("0", "привет"), ("1", "мир")]));
+        try
+        {
+            VocabularyCatalog.ResetForTests();
+            var pack = VocabularyCatalog.Initialize(dir).Packs[0];
+            const string text = "Привет, xyz мир";
+            var payload = DictionaryTextCodec.TryEncode(text, pack);
+            Assert.NotNull(payload);
+            Assert.True(DictionaryTextCodec.TryDecode(payload, pack, out var decoded));
+            Assert.Equal(text, decoded);
+        }
+        finally
+        {
+            VocabularyCatalog.ResetForTests();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
     public void Wire_Vocab_And_Compressed_RoundTrip()
     {
         var offer = ChatWireCodec.EncodeVocabOffer("RU:1,abc|EN:UNCOMPRESSED".Replace("UNCOMPRESSED", "1,def"));
