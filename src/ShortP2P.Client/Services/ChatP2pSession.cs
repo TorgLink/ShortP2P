@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ShortP2P.Auth;
 using ShortP2P.Auth.Data;
 using ShortP2P.Client.ChatMedia;
+using ShortP2P.Client.ChatMedia.Vocabulary;
 using ShortP2P.Client.Data;
 using ShortP2P.Client.Routing;
 using ShortP2P.Client.Transceivers;
@@ -114,6 +115,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// <summary>Manual server/mesh choice. Auto still allows the UDP-failure workaround.</summary>
     private ChatDeliveryPath _deliveryPath = ChatDeliveryPath.Auto;
     private ChatHandshakeStatus _handshakeStatus = ChatHandshakeStatus.Idle;
+
+    /// <summary>SMT-3: negotiated vocab map for this chat session (lang → version+hash or UNCOMPRESSED).</summary>
+    private Dictionary<string, VocabAcceptEntry>? _vocabAccepted;
 
     private ChatP2PSession(
         ChatEntity chat,
@@ -1113,6 +1117,36 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     await HandleTransferControlAsync(control, cancellationToken).ConfigureAwait(false);
                     shouldNotify = true;
                     break;
+                case ChatWireVocabOffer offer:
+                    await HandleVocabOfferAsync(offer, cancellationToken).ConfigureAwait(false);
+                    break;
+                case ChatWireVocabAccept accept:
+                    HandleVocabAccept(accept);
+                    break;
+                case ChatWireCompressedText compressed:
+                    if (TryDecodeCompressedText(compressed, out var decodedText))
+                    {
+                        if (SessionCryptoProbe.LooksLikeTestMessage(decodedText))
+                        {
+                            if (!TryHandleSessionCryptoProbeText(decodedText, cancellationToken))
+                                _logger.LogWarning(
+                                    "Chat {ChatId}: ignored malformed/unmatched session test frame (compressed)",
+                                    _chat.Id);
+                        }
+                        else
+                        {
+                            _ = await _repo.AddMessageAsync(_chat.Id, false, decodedText).ConfigureAwait(false);
+                            shouldNotify = true;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Chat {ChatId}: failed to decode compressed text ({Lang} v{Ver})",
+                            _chat.Id, compressed.Language, compressed.DictVersion);
+                    }
+
+                    break;
                 case ChatWireUserInfo userInfo:
                     await ApplyIncomingUserInfoAsync(userInfo, cancellationToken).ConfigureAwait(false);
                     break;
@@ -1784,7 +1818,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private static bool OutgoingWireNeedsPayloadBlob(ChatMessageEntity row) =>
         row.PayloadKind is (int)ChatPayloadKind.File or (int)ChatPayloadKind.Image;
 
-    private static byte[] BuildOutgoingWire(ChatMessageEntity row)
+    private byte[] BuildOutgoingWire(ChatMessageEntity row)
     {
         return row.PayloadKind switch
         {
@@ -1805,8 +1839,143 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 row.TransferPort,
                 row.TransferExpiresUtcTicks,
                 string.IsNullOrWhiteSpace(row.TransferId) ? null : row.TransferId)),
-            _ => ChatWireCodec.EncodeText(row.Text)
+            _ => EncodeTextPreferringDictionary(row.Text)
         };
+    }
+
+    private byte[] EncodeTextPreferringDictionary(string text)
+    {
+        var raw = ChatWireCodec.EncodeText(text);
+        Dictionary<string, VocabAcceptEntry>? accepted;
+        lock (_sync)
+            accepted = _vocabAccepted;
+        if (accepted == null || !VocabularyCatalog.IsInitialized)
+            return raw;
+
+        foreach (var (lang, entry) in accepted)
+        {
+            if (entry.IsUncompressed || entry.Blake3Hex == null)
+                continue;
+            if (!VocabularyCatalog.Instance.TryGet(lang, entry.Version, entry.Blake3Hex, out var pack) ||
+                pack == null)
+                continue;
+            var payload = DictionaryTextCodec.TryEncode(text, pack);
+            if (payload == null)
+                continue;
+            var framed = ChatWireCodec.EncodeCompressedText(lang, entry.Version, payload);
+            if (framed.Length < raw.Length)
+                return framed;
+        }
+
+        return raw;
+    }
+
+    private bool TryDecodeCompressedText(ChatWireCompressedText compressed, out string text)
+    {
+        text = "";
+        if (!VocabularyCatalog.IsInitialized)
+            return false;
+        Dictionary<string, VocabAcceptEntry>? accepted;
+        lock (_sync)
+            accepted = _vocabAccepted;
+        var lang = compressed.Language.Trim().ToUpperInvariant();
+        string? hash = null;
+        if (accepted != null &&
+            accepted.TryGetValue(lang, out var entry) &&
+            !entry.IsUncompressed)
+            hash = entry.Blake3Hex;
+        // Follower may decode using local pack matching version before accept is stored on both sides.
+        VocabularyPack? pack = null;
+        if (hash != null &&
+            VocabularyCatalog.Instance.TryGet(lang, compressed.DictVersion, hash, out pack) &&
+            pack != null)
+            return DictionaryTextCodec.TryDecode(compressed.Payload, pack, out text);
+
+        pack = VocabularyCatalog.Instance.PacksForLanguage(lang)
+            .FirstOrDefault(p => p.Version == compressed.DictVersion);
+        return pack != null && DictionaryTextCodec.TryDecode(compressed.Payload, pack, out text);
+    }
+
+    private async Task HandleVocabOfferAsync(ChatWireVocabOffer offer, CancellationToken cancellationToken)
+    {
+        if (IsCryptoSessionLeader())
+        {
+            _logger.LogDebug("Chat {ChatId}: ignored vocab offer on leader", _chat.Id);
+            return;
+        }
+
+        if (!VocabularyCatalog.IsInitialized ||
+            !VocabularyNegotiation.TryParseOffer(offer.OfferText, out var parsed))
+        {
+            _logger.LogWarning("Chat {ChatId}: vocab offer parse failed", _chat.Id);
+            return;
+        }
+
+        var accept = VocabularyNegotiation.SelectAccept(parsed, VocabularyCatalog.Instance);
+        lock (_sync)
+            _vocabAccepted = accept;
+        var acceptText = VocabularyNegotiation.FormatAccept(accept);
+        _logger.LogInformation("Chat {ChatId}: vocab accept → {Accept}", _chat.Id, acceptText);
+        var wire = ChatWireCodec.EncodeVocabAccept(acceptText);
+        try
+        {
+            await DeliverControlWireAsync(wire, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Chat {ChatId}: vocab accept send failed", _chat.Id);
+        }
+    }
+
+    private void HandleVocabAccept(ChatWireVocabAccept accept)
+    {
+        if (!IsCryptoSessionLeader())
+        {
+            _logger.LogDebug("Chat {ChatId}: ignored vocab accept on follower", _chat.Id);
+            return;
+        }
+
+        if (!VocabularyNegotiation.TryParseAccept(accept.AcceptText, out var parsed))
+        {
+            _logger.LogWarning("Chat {ChatId}: vocab accept parse failed", _chat.Id);
+            return;
+        }
+
+        lock (_sync)
+            _vocabAccepted = parsed;
+        _logger.LogInformation("Chat {ChatId}: vocab negotiation locked ← {Accept}", _chat.Id, accept.AcceptText);
+    }
+
+    private async Task ShareVocabOfferAfterEstablishAsync(CancellationToken cancellationToken)
+    {
+        if (!IsCryptoSessionLeader() || !VocabularyCatalog.IsInitialized)
+            return;
+        try
+        {
+            var offer = VocabularyCatalog.Instance.BuildOffer();
+            if (offer.Count == 0)
+                return;
+            var offerText = VocabularyNegotiation.FormatOffer(offer);
+            _logger.LogInformation("Chat {ChatId}: vocab offer → {Offer}", _chat.Id, offerText);
+            var wire = ChatWireCodec.EncodeVocabOffer(offerText);
+            await DeliverControlWireAsync(wire, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Chat {ChatId}: vocab offer send failed", _chat.Id);
+        }
+    }
+
+    private async Task DeliverControlWireAsync(byte[] wire, CancellationToken cancellationToken)
+    {
+        // Best-effort control frame over the same encrypted messenger path as UserInfo.
+        if (_messenger == null)
+            return;
+        var dests = BuildOrderedDirectPeerAddresses();
+        if (dests.Count > 0)
+            await _messenger.SendBinaryAsyncExpectAck(wire, dests, cancellationToken).ConfigureAwait(false);
+        else if (_peerAddress != null)
+            await _messenger.SendBinaryAsync(wire, _peerAddress, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task DeliverOutgoingWireAsync(int messageId, byte[] wire, CancellationToken cancellationToken)
@@ -1964,6 +2133,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         _userInfoSharedAfterEstablish = true;
         _ = ShareLocalUserInfoAfterEstablishAsync(cancellationToken);
+        _ = ShareVocabOfferAfterEstablishAsync(cancellationToken);
     }
 
     private async Task ShareLocalUserInfoAfterEstablishAsync(CancellationToken cancellationToken)
@@ -2004,7 +2174,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             .ConfigureAwait(false);
         RaiseMessagesChanged();
 
-        var wire = ChatWireCodec.EncodeText(text);
+        var wire = EncodeTextPreferringDictionary(text);
         QueueOutgoingDelivery(messageId, wire, cancellationToken);
     }
 
@@ -2619,6 +2789,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _messenger = null;
             _pendingInboundCipher = null;
             _pendingInboundCipherFrom = null;
+            _vocabAccepted = null;
         }
 
         ClearCryptoSession();
