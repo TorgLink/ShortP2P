@@ -545,10 +545,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
             if (from.Kind == TransportKind.Bluetooth) return true;
 
-            // Host transports (e.g. LoRa/Meshtastic): same spirit as BLE — accept when enabled so
-            // session setup can complete before MeshDirectory → chat endpoints sync catches up.
+            // Host transports (LoRa/Meshtastic): only frames from THIS chat's peer MeshId.
+            // A blanket accept made every open chat consume the same 0x01 and create bogus sessions.
             if (from.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
-                return true;
+                return IsHostTransportAddressForThisPeer(from);
 
             if (!string.IsNullOrEmpty(_chat.RelayRouteBlob))
                 return true;
@@ -556,6 +556,37 @@ public sealed class ChatP2PSession : IAsyncDisposable
         catch
         {
             // ignore
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    ///     True when the host transport maps <paramref name="from"/> to this chat's peer NetworkId
+    ///     (MeshDirectory / recent presence). Pulls fresh addresses before comparing.
+    /// </summary>
+    private bool IsHostTransportAddressForThisPeer(TransportAddress from)
+    {
+        MergeAdditionalTransportPeerAddresses();
+        if (_peerEndpoints.Any(x => x.Kind == from.Kind && x.Data.AsSpan().SequenceEqual(from.Data)))
+            return true;
+
+        var peerShort = _chat.PeerNetworkIdShort?.Trim();
+        var provider = _runtime.AdditionalTransports;
+        if (provider == null || string.IsNullOrWhiteSpace(peerShort))
+            return false;
+
+        try
+        {
+            foreach (var ep in provider.GetPeerAddresses(peerShort))
+            {
+                if (ep.Kind == from.Kind && ep.Data.AsSpan().SequenceEqual(from.Data))
+                    return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: host-transport peer address check failed", _chat.Id);
         }
 
         return false;
