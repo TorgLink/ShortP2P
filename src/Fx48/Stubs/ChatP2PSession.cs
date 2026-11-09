@@ -64,6 +64,9 @@ public sealed class ChatP2PSession
             ? (ChatDeliveryPath)_chat.DeliveryPath
             : ChatDeliveryPath.Server;
 
+    /// <summary>Fx48 has no Meshtastic/LoRa path.</summary>
+    public bool IsMeshtasticPathActive => false;
+
     /// <summary>Fx48 always delivers via messenger servers.</summary>
     public bool IsCommunicatingViaMessengerServer => true;
 

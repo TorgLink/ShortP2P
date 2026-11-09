@@ -771,6 +771,32 @@ public sealed class ChatP2PSession : IAsyncDisposable
     public ChatDeliveryPath DeliveryPath => _deliveryPath;
 
     /// <summary>
+    ///     True when outbound chat traffic is on Meshtastic/LoRa (primary peer endpoint Kind=5),
+    ///     or Mesh delivery path has a ready Meshtastic endpoint preferred for radio.
+    /// </summary>
+    public bool IsMeshtasticPathActive
+    {
+        get
+        {
+            MergeAdditionalTransportPeerAddresses();
+            lock (_sync)
+            {
+                if (_peerAddress != null && _peerAddress.Kind == TransportKind.Meshtastic)
+                    return true;
+                if (_deliveryPath != ChatDeliveryPath.Mesh)
+                    return false;
+                foreach (var ep in _peerEndpoints)
+                {
+                    if (ep.Kind == TransportKind.Meshtastic && IsOutboundTransportReady(ep.Kind))
+                        return true;
+                }
+
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
     ///     True when send/receive for this chat is pinned to a messenger server (manual Server path,
     ///     Auto server-first pin after hosting-server discovery, or bot chats).
     /// </summary>
@@ -2268,9 +2294,16 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _media.ValidateDocumentMime(mimeType);
         _media.ValidateFileSize(mimeType, fileBytes.Length, CurrentTrafficQuality);
 
+        var isVideo = mimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
+        if (isVideo && IsMeshtasticPathActive)
+        {
+            throw new InvalidOperationException(
+                "Передача видео по пути Meshtastic пока запрещена.");
+        }
+
         var payloadKindHuman = mimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
             ? "voice"
-            : mimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+            : isVideo
                 ? "video"
                 : "document";
         await CreateAndSendTransferOfferAsync(payloadKindHuman, safeName, mimeType, bytes, cancellationToken)
