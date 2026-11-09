@@ -35,6 +35,13 @@ public interface IAdditionalTransportProvider
     /// </summary>
     IReadOnlyList<TransportAddress> GetPeerAddresses(string networkIdShort);
 
+    /// <summary>
+    ///     Resolve the subscriber NetworkId (short form) that currently owns a host-transport
+    ///     address (e.g. Meshtastic MeshId). MeshId and NetworkId are different layers — never
+    ///     compare them directly. Returns false when ownership is unknown.
+    /// </summary>
+    bool TryResolvePeerNetworkId(TransportAddress from, out string networkIdShort);
+
     /// <summary>Raised with the peer NetworkId (short form) when a keep-alive/presence from it arrives.</summary>
     event EventHandler<string>? PeerPresenceSeen;
 }

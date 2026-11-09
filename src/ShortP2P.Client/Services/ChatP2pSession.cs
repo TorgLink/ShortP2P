@@ -546,6 +546,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         if (!IsTransportEnabled(from.Kind))
             return false;
+
+        // Host transports (LoRa/Meshtastic): MeshId ≠ NetworkId. Never accept solely because a
+        // stale MeshId remains in _peerEndpoints after the radio node moved to another subscriber.
+        if (from.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+            return IsHostTransportAddressForThisPeer(from);
+
         if (_peerEndpoints.Any(x => x.Kind == from.Kind && x.Data.AsSpan().SequenceEqual(from.Data)))
             return true;
         try
@@ -564,11 +570,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
             if (from.Kind == TransportKind.Bluetooth) return true;
 
-            // Host transports (LoRa/Meshtastic): only frames from THIS chat's peer MeshId.
-            // A blanket accept made every open chat consume the same 0x01 and create bogus sessions.
-            if (from.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
-                return IsHostTransportAddressForThisPeer(from);
-
             if (!string.IsNullOrEmpty(_chat.RelayRouteBlob))
                 return true;
         }
@@ -582,13 +583,11 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     /// <summary>
     ///     True when the host transport maps <paramref name="from"/> to this chat's peer NetworkId
-    ///     (MeshDirectory / recent presence). Pulls fresh addresses before comparing.
+    ///     (live MeshDirectory ownership). MeshId and NetworkId are different layers.
     /// </summary>
     private bool IsHostTransportAddressForThisPeer(TransportAddress from)
     {
         MergeAdditionalTransportPeerAddresses();
-        if (_peerEndpoints.Any(x => x.Kind == from.Kind && x.Data.AsSpan().SequenceEqual(from.Data)))
-            return true;
 
         var peerShort = _chat.PeerNetworkIdShort?.Trim();
         var provider = _runtime.AdditionalTransports;
@@ -597,6 +596,11 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
         try
         {
+            if (provider.TryResolvePeerNetworkId(from, out var ownerShort) &&
+                ChatRepository.PeerNetworkIdsEqual(ownerShort, peerShort))
+                return true;
+
+            // Fallback: destinations currently advertised for this peer NetworkId only.
             foreach (var ep in provider.GetPeerAddresses(peerShort))
             {
                 if (ep.Kind == from.Kind && ep.Data.AsSpan().SequenceEqual(from.Data))
@@ -1034,6 +1038,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     /// <summary>
     ///     Host mesh directory (e.g. LoRa): bind peer NetworkId to the radio address after cipher attribution.
+    ///     Skips when the MeshId is already owned by a different NetworkId (module reused by another subscriber).
     /// </summary>
     private void TryRememberAdditionalPeer(TransportAddress from)
     {
@@ -1042,9 +1047,21 @@ public sealed class ChatP2PSession : IAsyncDisposable
         var provider = _runtime.AdditionalTransports;
         if (provider == null || !provider.IsEnabled(from.Kind))
             return;
+        var peerShort = _chat.PeerNetworkIdShort?.Trim();
+        if (string.IsNullOrWhiteSpace(peerShort))
+            return;
         try
         {
-            var wire = CompressedNetworkId.FromShortString(_chat.PeerNetworkIdShort).ToWireBytes();
+            if (provider.TryResolvePeerNetworkId(from, out var ownerShort) &&
+                !ChatRepository.PeerNetworkIdsEqual(ownerShort, peerShort))
+            {
+                _logger.LogDebug(
+                    "Chat {ChatId}: skip RememberPeer — MeshId owned by {Owner}, chat peer is {Peer}",
+                    _chat.Id, ownerShort, peerShort);
+                return;
+            }
+
+            var wire = CompressedNetworkId.FromShortString(peerShort).ToWireBytes();
             provider.RememberPeer(wire, from);
         }
         catch (Exception ex)
@@ -3837,6 +3854,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// <summary>
     ///     Pull MeshDirectory / host-transport addresses for this peer into the live route so session
     ///     setup can leave on LoRa even before chat-row endpoint sync lands.
+    ///     Also drops stale Meshtastic MeshIds that no longer belong to this peer NetworkId.
     /// </summary>
     private void MergeAdditionalTransportPeerAddresses()
     {
@@ -3856,8 +3874,27 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         }
 
-        if (extras.Count == 0)
-            return;
+        // Prune host-transport endpoints that the directory no longer attributes to this NetworkId.
+        _peerEndpoints.RemoveAll(ep =>
+        {
+            if (ep.Kind is TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer)
+                return false;
+            if (!provider.IsEnabled(ep.Kind))
+                return false;
+            try
+            {
+                if (provider.TryResolvePeerNetworkId(ep, out var owner) &&
+                    !ChatRepository.PeerNetworkIdsEqual(owner, peerShort))
+                    return true;
+            }
+            catch
+            {
+                // keep endpoint if resolve throws
+            }
+
+            return extras.Count > 0 &&
+                   !extras.Any(x => x.Kind == ep.Kind && x.Data.AsSpan().SequenceEqual(ep.Data));
+        });
 
         foreach (var ep in extras)
         {
