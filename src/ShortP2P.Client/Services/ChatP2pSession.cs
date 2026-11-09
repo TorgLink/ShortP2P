@@ -1852,9 +1852,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (accepted == null || !VocabularyCatalog.IsInitialized)
             return raw;
 
-        foreach (var (lang, entry) in accepted)
+        // Prefer language matching the script (Cyrillic → RU, else EN), then remaining negotiated langs.
+        foreach (var lang in PreferredVocabLanguages(text, accepted.Keys))
         {
-            if (entry.IsUncompressed || entry.Blake3Hex == null)
+            if (!accepted.TryGetValue(lang, out var entry) || entry.IsUncompressed || entry.Blake3Hex == null)
                 continue;
             if (!VocabularyCatalog.Instance.TryGet(lang, entry.Version, entry.Blake3Hex, out var pack) ||
                 pack == null)
@@ -1868,6 +1869,25 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
 
         return raw;
+    }
+
+    private static IEnumerable<string> PreferredVocabLanguages(string text, IEnumerable<string> available)
+    {
+        var set = new HashSet<string>(available, StringComparer.OrdinalIgnoreCase);
+        var preferRu = text.Any(static c => c is >= '\u0400' and <= '\u04FF');
+        if (preferRu && set.Contains("RU"))
+            yield return "RU";
+        if (set.Contains("EN"))
+            yield return "EN";
+        foreach (var lang in set.OrderBy(l => l, StringComparer.Ordinal))
+        {
+            if (lang is "RU" or "EN")
+                continue;
+            yield return lang.ToUpperInvariant();
+        }
+
+        if (!preferRu && set.Contains("RU"))
+            yield return "RU";
     }
 
     private bool TryDecodeCompressedText(ChatWireCompressedText compressed, out string text)
