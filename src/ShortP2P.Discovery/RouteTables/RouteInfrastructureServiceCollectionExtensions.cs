@@ -23,10 +23,40 @@ public static class RouteInfrastructureServiceCollectionExtensions
         if (!string.IsNullOrEmpty(connectionString))
             EnsureSqliteParentDirectoryExists(connectionString);
 
-        await db.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
-
         var logger = services.GetService<ILoggerFactory>()?.CreateLogger("ShortP2P.RouteDb");
-        logger?.LogInformation("Route database migrations applied");
+
+        // Skip MigrateAsync when already up to date. A stale __EFMigrationsLock row from a
+        // crashed prior start makes MigrateAsync retry INSERT OR IGNORE every ~1s forever.
+        var pending = (await db.Database.GetPendingMigrationsAsync(cancellationToken).ConfigureAwait(false))
+            .ToArray();
+        if (pending.Length == 0)
+        {
+            await TryClearSqliteMigrationsLockAsync(db, logger, cancellationToken).ConfigureAwait(false);
+            logger?.LogInformation("Route database migrations already applied");
+            return;
+        }
+
+        // MAUI / desktop is single-process for this DB — clear an abandoned advisory lock first.
+        await TryClearSqliteMigrationsLockAsync(db, logger, cancellationToken).ConfigureAwait(false);
+        await db.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+        logger?.LogInformation("Route database migrations applied ({Count} pending)", pending.Length);
+    }
+
+    private static async Task TryClearSqliteMigrationsLockAsync(
+        RouteDbContext db, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                    """DELETE FROM "__EFMigrationsLock";""",
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Table may not exist yet on first run.
+            logger?.LogDebug(ex, "Could not clear EF migrations lock (ok on first run)");
+        }
     }
 
     private static void EnsureSqliteParentDirectoryExists(string connectionString)

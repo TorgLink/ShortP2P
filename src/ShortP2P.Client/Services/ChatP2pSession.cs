@@ -599,15 +599,28 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
         try
         {
-            if (provider.TryResolvePeerNetworkId(from, out var ownerShort) &&
-                ChatRepository.PeerNetworkIdsEqual(ownerShort, peerShort))
-                return true;
+            if (provider.TryResolvePeerNetworkId(from, out var ownerShort))
+            {
+                if (ChatRepository.PeerNetworkIdsEqual(ownerShort, peerShort))
+                    return true;
+                // MeshId confirmed elsewhere — never accept for this chat.
+                return false;
+            }
 
             // Fallback: destinations currently advertised for this peer NetworkId only.
             foreach (var ep in provider.GetPeerAddresses(peerShort))
             {
                 if (ep.Kind == from.Kind && ep.Data.AsSpan().SequenceEqual(from.Data))
                     return true;
+            }
+
+            // Sticky chat-row / in-memory endpoints: presence may be skipped under duty cycle,
+            // but we already TX'd 0x04 / invites to this MeshId for this peer.
+            if (_peerEndpoints.Any(ep =>
+                    ep.Kind == from.Kind && ep.Data.AsSpan().SequenceEqual(from.Data)))
+            {
+                TryRememberAdditionalPeer(from);
+                return true;
             }
         }
         catch (Exception ex)
@@ -3049,6 +3062,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     _chat.Id, frame, packet.Length, FormatTransportAddress(dest));
                 await transport.SendAsync(packet, dest, cancellationToken).ConfigureAwait(false);
                 anySuccess = true;
+                // Bind MeshId → peer NetworkId on outbound so inbound 0x01/0x02 (no NetworkId in frame)
+                // are accepted even when presence 0x31 was skipped under duty cycle.
+                if (dest.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+                    TryRememberAdditionalPeer(dest);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3085,6 +3102,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _chat.Id, cipherPayload.Length, FormatTransportAddress(destination));
         await message.SendAsync(new TransportReceiveMessage(cipherPayload, destination), destination,
             cancellationToken).ConfigureAwait(false);
+        if (destination.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+            TryRememberAdditionalPeer(destination);
     }
 
     private ITransport? ResolveOutbound(TransportAddress destination)
@@ -3976,6 +3995,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 return false;
             try
             {
+                // Drop only when MeshId is confirmed owned by another NetworkId.
+                // Do not prune on temporary directory emptiness or a newer alternate MeshId —
+                // that wiped sticky LoRa routes and rejected inbound 0x01/0x02.
                 if (provider.TryResolvePeerNetworkId(ep, out var owner) &&
                     !ChatRepository.PeerNetworkIdsEqual(owner, peerShort))
                     return true;
@@ -3985,8 +4007,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 // keep endpoint if resolve throws
             }
 
-            return extras.Count > 0 &&
-                   !extras.Any(x => x.Kind == ep.Kind && x.Data.AsSpan().SequenceEqual(ep.Data));
+            return false;
         });
 
         foreach (var ep in extras)
@@ -4040,6 +4061,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _peerEndpoints.RemoveAll(ep =>
             ep.Kind == endpoint.Kind && ep.Data.AsSpan().SequenceEqual(endpoint.Data));
         _peerEndpoints.Insert(0, endpoint);
+        if (endpoint.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+            TryRememberAdditionalPeer(endpoint);
     }
 
     private async Task TryBleFallbackAsync(CancellationToken cancellationToken)
