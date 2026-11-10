@@ -20,6 +20,9 @@ public sealed class ChatP2PSession
 {
     public const int MaxMessageChars = 32768;
 
+    /// <summary>SHO-29 / TRL-33: Meshtastic airtime cap (Fx48 has no Meshtastic path).</summary>
+    public const int MaxMeshtasticMessageChars = 250;
+
     private readonly object _pendingSync = new();
     private readonly List<int> _pendingOutgoing = [];
     private readonly SemaphoreSlim _flushPendingSem = new(1, 1);

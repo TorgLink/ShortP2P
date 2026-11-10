@@ -41,6 +41,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     public const int MaxMessageChars = 32768;
 
+    /// <summary>SHO-29 / TRL-33: Meshtastic airtime cap for outbound plain text.</summary>
+    public const int MaxMeshtasticMessageChars = 250;
+
     /// <summary>SHO-10: how many newest unsent outgoing rows to retry after UDP falls back.</summary>
     public const int UdpFallbackLatestUnsentCount = 20;
     private static readonly TimeSpan DecryptRecoveryCooldown = TimeSpan.FromSeconds(10);
@@ -2370,6 +2373,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (text.Length > MaxMessageChars)
             throw new ArgumentException($"Message is too long. Max length is {MaxMessageChars} characters.",
                 nameof(text));
+        EnsureMeshtasticAllowsText(text);
 
         var messageId = await _repo.AddMessageAsync(_chat.Id, true, text, MessageDeliveryStatus.Pending)
             .ConfigureAwait(false);
@@ -2404,6 +2408,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (imageBytes.Length == 0)
             throw new ArgumentException("Image is empty.", nameof(imageBytes));
 
+        EnsureMeshtasticAllowsBinary();
+
         var bytes = imageBytes.ToArray();
         if (_chat.IsBot)
         {
@@ -2423,6 +2429,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         if (fileBytes.Length == 0)
             throw new ArgumentException("File is empty.", nameof(fileBytes));
+
+        EnsureMeshtasticAllowsBinary();
 
         var bytes = fileBytes.ToArray();
         var safeName = Path.GetFileName(fileName.Trim());
@@ -2450,12 +2458,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _media.ValidateFileSize(mimeType, fileBytes.Length, CurrentTrafficQuality);
 
         var isVideo = mimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
-        if (isVideo && IsMeshtasticPathActive)
-        {
-            throw new InvalidOperationException(
-                "Передача видео по пути Meshtastic пока запрещена.");
-        }
-
         var payloadKindHuman = mimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
             ? "voice"
             : isVideo
@@ -2463,6 +2465,25 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 : "document";
         await CreateAndSendTransferOfferAsync(payloadKindHuman, safeName, mimeType, bytes, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>SHO-29 / TRL-33: Meshtastic cannot carry voice/image/document blobs.</summary>
+    private void EnsureMeshtasticAllowsBinary()
+    {
+        if (!IsMeshtasticPathActive)
+            return;
+        throw new InvalidOperationException(
+            "Binary transfers (voice, images, documents) are not allowed on the Meshtastic path.");
+    }
+
+    /// <summary>SHO-29 / TRL-33: Meshtastic outbound text is capped at <see cref="MaxMeshtasticMessageChars"/>.</summary>
+    private void EnsureMeshtasticAllowsText(string text)
+    {
+        if (!IsMeshtasticPathActive || text.Length <= MaxMeshtasticMessageChars)
+            return;
+        throw new ArgumentException(
+            $"Text over {MaxMeshtasticMessageChars} characters is not allowed on the Meshtastic path.",
+            nameof(text));
     }
 
     public async Task RequestBinaryDownloadAsync(int messageId, CancellationToken cancellationToken = default)
