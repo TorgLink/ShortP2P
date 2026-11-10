@@ -20,6 +20,7 @@ public static class ChatWireCodec
     private const byte KindVocabOffer = 0x07;
     private const byte KindVocabAccept = 0x08;
     private const byte KindCompressedText = 0x09;
+    private const byte KindSessionProbe = 0x0A;
     private static ReadOnlySpan<byte> Magic => "S2P1"u8;
 
     /// <summary>Магия S2P1 без успешного разбора вида — чтобы не показывать мусор как текст UTF-8.</summary>
@@ -36,6 +37,27 @@ public static class ChatWireCodec
         buf[Magic.Length] = KindText;
         BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(Magic.Length + 1, 4), (uint)utf8.Length);
         utf8.CopyTo(buf.AsSpan(Magic.Length + 1 + 4));
+        return buf;
+    }
+
+    /// <summary>
+    /// Compact session crypto probe. Body: version(1) | kind(1) | challenge(8).
+    /// Sized so one messenger chunk encrypts to ≤ 80 bytes under AES-CBC+HMAC.
+    /// </summary>
+    public static byte[] EncodeSessionProbe(byte probeKind, ReadOnlySpan<byte> challenge)
+    {
+        if (challenge.Length != 8)
+            throw new ArgumentException("Session probe challenge must be 8 bytes.", nameof(challenge));
+
+        const int bodyLen = 1 + 1 + 8;
+        var buf = new byte[Magic.Length + 1 + 4 + bodyLen];
+        Magic.CopyTo(buf);
+        buf[Magic.Length] = KindSessionProbe;
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(Magic.Length + 1, 4), bodyLen);
+        var body = buf.AsSpan(Magic.Length + 1 + 4);
+        body[0] = 1; // version
+        body[1] = probeKind;
+        challenge.CopyTo(body[2..]);
         return buf;
     }
 
@@ -354,6 +376,22 @@ public static class ChatWireCodec
             if (rest.Length < payLen)
                 return false;
             message = new ChatWireCompressedText(lang, ver, rest.Slice(0, (int)payLen).ToArray());
+            return true;
+        }
+
+        if (kind == KindSessionProbe)
+        {
+            if (rest.Length < 4)
+                return false;
+            var len = BinaryPrimitives.ReadUInt32LittleEndian(rest);
+            rest = rest.Slice(4);
+            if (len != 1 + 1 + 8 || rest.Length < len)
+                return false;
+            if (rest[0] != 1)
+                return false;
+            var probeKind = rest[1];
+            var challenge = rest.Slice(2, 8).ToArray();
+            message = new ChatWireSessionProbe(probeKind, challenge);
             return true;
         }
 

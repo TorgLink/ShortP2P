@@ -1126,6 +1126,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
             NoteEncryptedPathProof(cancellationToken);
             switch (wire)
             {
+                case ChatWireSessionProbe probe:
+                    if (!TryHandleSessionCryptoProbeBinary(probe, cancellationToken))
+                        _logger.LogWarning(
+                            "Chat {ChatId}: ignored malformed/unmatched binary session probe (not shown in UI)",
+                            _chat.Id);
+                    break;
                 case ChatWireText t:
                     if (SessionCryptoProbe.LooksLikeTestMessage(t.Text))
                     {
@@ -3367,15 +3373,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 var canProbe = ms != null && _handshakeWeInitiated && IsCryptoSessionLeader();
                 if (canProbe)
                 {
-                    var my = _user.NetworkIdShort.Trim();
-                    var peer = _chat.PeerNetworkIdShort.Trim();
-                    var testWire = ChatWireCodec.EncodeText(
-                        SessionCryptoProbe.FormatTestSend(my, peer, DateTimeOffset.UtcNow, out var sendHash));
+                    var testWire = SessionCryptoProbe.CreateSendWire(out var challenge);
+                    SessionCryptoProbe.EnsureEncryptedSizeWithinBudget(testWire);
+                    var sendKey = SessionCryptoProbe.ChallengeToKey(challenge);
 
                     TaskCompletionSource<bool> tcs;
                     lock (_sync)
                     {
-                        _outstandingTestSendHash = sendHash;
+                        _outstandingTestSendHash = sendKey;
                         _cryptoProbeOkAwaiter?.TrySetCanceled();
                         _cryptoProbeOkAwaiter = tcs =
                             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3384,14 +3389,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     try
                     {
                         _logger.LogInformation(
-                            "Chat {ChatId}: sending crypto probe test_send hash={Hash}",
-                            _chat.Id, sendHash);
+                            "Chat {ChatId}: sending compact crypto probe test_send challenge={Hash} wire={WireBytes}b enc≤{MaxEnc}b",
+                            _chat.Id, sendKey, testWire.Length, SessionCryptoProbe.MaxEncryptedBytes);
                         await SendEncryptedProbeWireAsync(testWire, cancellationToken).ConfigureAwait(false);
                         await tcs.Task.WaitAsync(okWait, cancellationToken).ConfigureAwait(false);
                         MarkCryptoSessionEstablished(cancellationToken);
                         _logger.LogInformation(
                             "Chat {ChatId}: crypto probe round-trip confirmed (test_response for {Hash})",
-                            _chat.Id, sendHash);
+                            _chat.Id, sendKey);
                         return;
                     }
                     catch (TimeoutException)
@@ -3415,7 +3420,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         {
                             if (ReferenceEquals(_cryptoProbeOkAwaiter, tcs))
                                 _cryptoProbeOkAwaiter = null;
-                            if (string.Equals(_outstandingTestSendHash, sendHash, StringComparison.OrdinalIgnoreCase))
+                            if (string.Equals(_outstandingTestSendHash, sendKey, StringComparison.OrdinalIgnoreCase))
                                 _outstandingTestSendHash = null;
                         }
                     }
@@ -3520,20 +3525,18 @@ public sealed class ChatP2PSession : IAsyncDisposable
         await m.SendBinaryAsync(wire, _peerAddress!, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task SendCryptoProbeTestResponseAsync(string testSendHash, CancellationToken cancellationToken)
+    private async Task SendCryptoProbeTestResponseAsync(ReadOnlyMemory<byte> challenge, CancellationToken cancellationToken)
     {
         try
         {
             var m = _messenger;
             if (m == null)
                 return;
-            var my = _user.NetworkIdShort.Trim();
-            var peer = _chat.PeerNetworkIdShort.Trim();
-            var wire = ChatWireCodec.EncodeText(
-                SessionCryptoProbe.FormatTestResponse(my, peer, testSendHash, DateTimeOffset.UtcNow, out _));
+            var wire = SessionCryptoProbe.CreateResponseWire(challenge.Span);
+            SessionCryptoProbe.EnsureEncryptedSizeWithinBudget(wire);
             _logger.LogInformation(
-                "Chat {ChatId}: sending crypto probe test_response_for_{Hash}",
-                _chat.Id, testSendHash);
+                "Chat {ChatId}: sending compact crypto probe test_response challenge={Hash} wire={WireBytes}b",
+                _chat.Id, SessionCryptoProbe.ChallengeToKey(challenge.Span), wire.Length);
             await SendEncryptedProbeWireAsync(wire, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -3542,8 +3545,66 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
     }
 
+    private bool TryHandleSessionCryptoProbeBinary(ChatWireSessionProbe probe, CancellationToken cancellationToken)
+    {
+        if (!SessionCryptoProbe.TryParseBinary(probe, out var kind, out var challenge))
+            return false;
+
+        bool weInitiated;
+        string? outstandingKey;
+        lock (_sync)
+        {
+            weInitiated = _handshakeWeInitiated;
+            outstandingKey = _outstandingTestSendHash;
+        }
+
+        var key = SessionCryptoProbe.ChallengeToKey(challenge);
+        if (kind == SessionCryptoProbeKind.TestSend)
+        {
+            if (weInitiated)
+                return true;
+            _logger.LogInformation(
+                "Chat {ChatId}: received compact crypto probe test_send challenge={Hash}, sending test_response",
+                _chat.Id, key);
+            _ = SendCryptoProbeTestResponseAsync(challenge, cancellationToken);
+            MarkCryptoSessionEstablished(cancellationToken);
+            return true;
+        }
+
+        if (kind == SessionCryptoProbeKind.TestResponse)
+        {
+            if (!weInitiated)
+                return true;
+            if (string.IsNullOrEmpty(outstandingKey) ||
+                !string.Equals(key, outstandingKey, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Chat {ChatId}: crypto probe test_response challenge mismatch (got={Got}, expected={Expected})",
+                    _chat.Id, key, outstandingKey ?? "(none)");
+                return true;
+            }
+
+            _logger.LogInformation(
+                "Chat {ChatId}: received matching compact crypto probe test_response challenge={Hash}",
+                _chat.Id, key);
+            TaskCompletionSource<bool>? w;
+            lock (_sync)
+            {
+                w = _cryptoProbeOkAwaiter;
+                _cryptoProbeOkAwaiter = null;
+                _outstandingTestSendHash = null;
+            }
+
+            w?.TrySetResult(true);
+            return true;
+        }
+
+        return false;
+    }
+
     private bool TryHandleSessionCryptoProbeText(string text, CancellationToken cancellationToken)
     {
+        // Legacy text probes from older peers (large on LoRa; we no longer send these).
         if (!SessionCryptoProbe.TryParse(text, out var message))
             return false;
         var my = _user.NetworkIdShort.Trim();
@@ -3564,12 +3625,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (message.Kind == SessionCryptoProbeKind.TestSend)
         {
             if (weInitiated)
-                return true; // leader ignores inbound test_send
+                return true;
             _logger.LogInformation(
-                "Chat {ChatId}: received crypto probe test_send hash={Hash}, sending test_response",
-                _chat.Id, message.ContentHash);
-            _ = SendCryptoProbeTestResponseAsync(message.ContentHash, cancellationToken);
-            // Decrypting a valid test_send proves the follower path; mark confirmed for UI.
+                "Chat {ChatId}: received legacy text crypto probe test_send; ignoring oversized reply path",
+                _chat.Id);
+            // Do not reply with another large text probe. Mark local path proven; leader should
+            // re-probe with the compact binary format once it upgrades / retries.
             MarkCryptoSessionEstablished(cancellationToken);
             return true;
         }
@@ -3583,14 +3644,11 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 !string.Equals(referenced, outstandingHash, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning(
-                    "Chat {ChatId}: crypto probe test_response hash mismatch (got={Got}, expected={Expected})",
+                    "Chat {ChatId}: legacy crypto probe test_response hash mismatch (got={Got}, expected={Expected})",
                     _chat.Id, referenced, outstandingHash ?? "(none)");
                 return true;
             }
 
-            _logger.LogInformation(
-                "Chat {ChatId}: received matching crypto probe test_response_for_{Hash}",
-                _chat.Id, referenced);
             TaskCompletionSource<bool>? w;
             lock (_sync)
             {

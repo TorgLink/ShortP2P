@@ -1,43 +1,104 @@
-using System.Globalization;
+using System.Buffers.Binary;
 using System.Security.Cryptography;
-using System.Text;
+using ShortP2P.Client.ChatMedia;
+using ShortP2P.Crypto;
 
 namespace ShortP2P.Client.Services;
 
 /// <summary>
-///     Hidden session-coordination text frames (not stored in chat history).
-///     Format:
-///     <c>networkId1:networkId2:test_send|test_response_for_&lt;hash&gt;:test:datetime:sha512hex</c>
-///     where SHA-512 covers everything before the final <c>:hash</c> field.
+/// Compact binary session crypto probe for LoRa-friendly round-trips.
+/// Wire (ChatWire): S2P1 + kind + len + body(version, probe-kind, challenge8).
+/// After messenger chunk header (24) + AES-CBC+HMAC the encrypted radio packet is ≤
+/// <see cref="MaxEncryptedBytes"/>.
+/// Legacy text frames are still recognized on receive for older peers.
 /// </summary>
 public static class SessionCryptoProbe
 {
+    public const byte BodyVersion = 1;
+    public const byte KindSend = 1;
+    public const byte KindResponse = 2;
+    public const int ChallengeBytes = 8;
+    public const int BodyBytes = 1 + 1 + ChallengeBytes;
+
+    /// <summary>Hard cap for one encrypted messenger chunk carrying a probe (send or response).</summary>
+    public const int MaxEncryptedBytes = 80;
+
+    /// <summary>Messenger <c>ChunkCodec</c> header size (Guid + index + total).</summary>
+    public const int MessengerChunkHeaderBytes = 24;
+
     public const string KindTestSend = "test_send";
     public const string KindTestResponsePrefix = "test_response_for_";
-    public const string LiteralTest = "test";
     private const string TestSeparator = ":test:";
 
-    /// <summary>Builds a <c>test_send</c> frame; <paramref name="contentHash"/> is SHA-512 of the payload without the hash field.</summary>
-    public static string FormatTestSend(string sourcePeerIdShort, string targetPeerIdShort, DateTimeOffset utc,
-        out string contentHash)
+    public static byte[] CreateSendWire(out byte[] challenge)
     {
-        var datetime = FormatDateTime(utc);
-        var withoutHash = JoinWithoutHash(sourcePeerIdShort, targetPeerIdShort, KindTestSend, datetime);
-        contentHash = ComputeSha512Hex(withoutHash);
-        return withoutHash + ":" + contentHash;
+        challenge = RandomNumberGenerator.GetBytes(ChallengeBytes);
+        return ChatWireCodec.EncodeSessionProbe(KindSend, challenge);
     }
 
-    /// <summary>Builds a <c>test_response_for_&lt;testSendHash&gt;</c> frame for a received test_send hash.</summary>
-    public static string FormatTestResponse(string sourcePeerIdShort, string targetPeerIdShort,
-        string testSendHash, DateTimeOffset utc, out string contentHash)
+    public static byte[] CreateResponseWire(ReadOnlySpan<byte> challenge) =>
+        ChatWireCodec.EncodeSessionProbe(KindResponse, challenge);
+
+    public static bool TryParseBinary(ChatWireSessionProbe probe, out SessionCryptoProbeKind kind,
+        out byte[] challenge)
     {
-        Require.NotNullOrWhiteSpace(testSendHash);
-        var kind = KindTestResponsePrefix + testSendHash.Trim();
-        var datetime = FormatDateTime(utc);
-        var withoutHash = JoinWithoutHash(sourcePeerIdShort, targetPeerIdShort, kind, datetime);
-        contentHash = ComputeSha512Hex(withoutHash);
-        return withoutHash + ":" + contentHash;
+        kind = default;
+        challenge = Array.Empty<byte>();
+        if (probe.Challenge.Length != ChallengeBytes)
+            return false;
+        if (probe.Kind == KindSend)
+        {
+            kind = SessionCryptoProbeKind.TestSend;
+            challenge = (byte[])probe.Challenge.Clone();
+            return true;
+        }
+
+        if (probe.Kind == KindResponse)
+        {
+            kind = SessionCryptoProbeKind.TestResponse;
+            challenge = (byte[])probe.Challenge.Clone();
+            return true;
+        }
+
+        return false;
     }
+
+    public static string ChallengeToKey(ReadOnlySpan<byte> challenge) =>
+        Convert.ToHexString(challenge).ToLowerInvariant();
+
+    /// <summary>
+    /// Encrypted size of one messenger chunk for a probe wire under current AES-CBC+HMAC.
+    /// </summary>
+    public static int EstimateEncryptedChunkBytes(int wireLength)
+    {
+        var plain = MessengerChunkHeaderBytes + wireLength;
+        var rem = plain % 16;
+        var padded = plain + (rem == 0 ? 16 : 16 - rem);
+        return 16 + padded + 16;
+    }
+
+    public static void EnsureEncryptedSizeWithinBudget(byte[] wire)
+    {
+        Require.NotNull(wire);
+        var encrypted = EstimateEncryptedChunkBytes(wire.Length);
+        if (encrypted > MaxEncryptedBytes)
+            throw new InvalidOperationException(
+                $"Crypto probe encrypted size {encrypted} exceeds {MaxEncryptedBytes} bytes.");
+    }
+
+    /// <summary>Verifies budget with a real session encrypt (chunk header + wire).</summary>
+    public static int MeasureEncryptedChunkBytes(P2PSession session, ReadOnlySpan<byte> wire)
+    {
+        Require.NotNull(session);
+        var plain = new byte[MessengerChunkHeaderBytes + wire.Length];
+        RandomNumberGenerator.Fill(plain.AsSpan(0, 16));
+        BinaryPrimitives.WriteInt32BigEndian(plain.AsSpan(16), 0);
+        BinaryPrimitives.WriteInt32BigEndian(plain.AsSpan(20), 1);
+        wire.CopyTo(plain.AsSpan(MessengerChunkHeaderBytes));
+        return session.Encrypt(plain).Length;
+    }
+
+    // --- Legacy text probes (receive-only compatibility) ---
 
     public static bool TryParse(string text, out SessionCryptoProbeMessage message)
     {
@@ -64,8 +125,8 @@ public static class SessionCryptoProbe
 
         var src = left[..c1].Trim();
         var tgt = left[(c1 + 1)..c2].Trim();
-        var kind = left[(c2 + 1)..].Trim();
-        if (src.Length == 0 || tgt.Length == 0 || kind.Length == 0)
+        var kindToken = left[(c2 + 1)..].Trim();
+        if (src.Length == 0 || tgt.Length == 0 || kindToken.Length == 0)
             return false;
 
         var lastColon = right.LastIndexOf(':');
@@ -79,29 +140,29 @@ public static class SessionCryptoProbe
 
         SessionCryptoProbeKind probeKind;
         string? referencedSendHash = null;
-        if (string.Equals(kind, KindTestSend, StringComparison.Ordinal))
+        if (string.Equals(kindToken, KindTestSend, StringComparison.Ordinal))
         {
             probeKind = SessionCryptoProbeKind.TestSend;
         }
-        else if (kind.StartsWith(KindTestResponsePrefix, StringComparison.Ordinal) &&
-                 kind.Length > KindTestResponsePrefix.Length)
+        else if (kindToken.StartsWith(KindTestResponsePrefix, StringComparison.Ordinal) &&
+                 kindToken.Length > KindTestResponsePrefix.Length)
         {
             probeKind = SessionCryptoProbeKind.TestResponse;
-            referencedSendHash = kind[KindTestResponsePrefix.Length..];
+            referencedSendHash = kindToken[KindTestResponsePrefix.Length..];
         }
         else
             return false;
 
-        var withoutHash = JoinWithoutHash(src, tgt, kind, datetime);
-        var expectedHash = ComputeSha512Hex(withoutHash);
+        var withoutHash = $"{src}:{tgt}:{kindToken}:test:{datetime}";
+        var expectedHash = Convert.ToHexString(SHA512.HashData(System.Text.Encoding.UTF8.GetBytes(withoutHash)))
+            .ToLowerInvariant();
         if (!FixedTimeEqualsHex(expectedHash, hash))
             return false;
 
-        message = new SessionCryptoProbeMessage(probeKind, src, tgt, kind, datetime, hash, referencedSendHash);
+        message = new SessionCryptoProbeMessage(probeKind, src, tgt, kindToken, datetime, hash, referencedSendHash);
         return true;
     }
 
-    /// <summary>True when the text is a session test frame that must not appear in chat UI.</summary>
     public static bool LooksLikeTestMessage(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -124,20 +185,6 @@ public static class SessionCryptoProbe
         return string.Equals(kind, KindTestSend, StringComparison.Ordinal) ||
                kind.StartsWith(KindTestResponsePrefix, StringComparison.Ordinal);
     }
-
-    public static string ComputeSha512Hex(string payloadWithoutHash)
-    {
-        Require.NotNull(payloadWithoutHash);
-        var bytes = Encoding.UTF8.GetBytes(payloadWithoutHash);
-        var hash = SHA512.HashData(bytes);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private static string JoinWithoutHash(string src, string tgt, string kind, string datetime) =>
-        $"{src.Trim()}:{tgt.Trim()}:{kind}:{LiteralTest}:{datetime}";
-
-    private static string FormatDateTime(DateTimeOffset utc) =>
-        utc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
 
     private static bool FixedTimeEqualsHex(string a, string b)
     {
