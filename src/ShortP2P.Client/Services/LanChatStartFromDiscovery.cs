@@ -1,7 +1,6 @@
 using System.Net;
 using ShortP2P.Auth;
 using ShortP2P.Auth.Data;
-using ShortP2P.Client.Data;
 using ShortP2P.Client.Routing;
 using ShortP2P.Client.Services.MessengerServers;
 using ShortP2P.Crypto;
@@ -11,19 +10,10 @@ using ShortP2P.Transport.Abstractions;
 
 namespace ShortP2P.Client.Services;
 
-/// <summary>Optional runtime pieces for LAN chat start (UDP invite / messenger servers).</summary>
-public sealed class LanChatStartContext
-{
-    public MessengerServerSyncService? MessengerServers { get; init; }
-    public IUdpTransportFactory? UdpTransportFactory { get; init; }
-    public P2pRoutingSettings? Settings { get; init; }
-    public ITransport? BluetoothTransport { get; init; }
-    public string? BluetoothAdapterMac { get; init; }
-    public Func<CancellationToken, Task>? StopInviteListenerAsync { get; init; }
-    public Func<UserEntity, CancellationToken, Task>? EnsureInviteListenerAsync { get; init; }
-}
-
-/// <summary>Начало чата с пиром из LAN discovery: отправка ChatInvite и ожидание ответного приглашения с ключом.</summary>
+/// <summary>
+///     Начало чата с пиром из discovery: отправка ChatInvite (UDP / Bluetooth / host transport, например
+///     LoRa Kind=5) и ожидание ответного приглашения с ключом.
+/// </summary>
 public static class LanChatStartFromDiscovery
 {
     public static async Task<LanChatStartResult> TryStartAsync(
@@ -41,18 +31,32 @@ public static class LanChatStartFromDiscovery
             return await TryStartViaMessengerServerAsync(peer, auth, chats, context?.MessengerServers, cancellationToken)
                 .ConfigureAwait(false);
 
-        if (peer.TransportKind != TransportKind.Udp)
+        ITransport? hostTransport = null;
+        switch (peer.TransportKind)
         {
-            if (peer.TransportKind != TransportKind.Bluetooth)
-                return LanChatStartResult.Failed("Неподдерживаемый транспорт пира.");
-            if (context?.BluetoothTransport == null)
-                return LanChatStartResult.Failed("Bluetooth transport is unavailable.");
+            case TransportKind.Udp:
+                break;
+            case TransportKind.Bluetooth:
+                if (context?.BluetoothTransport == null)
+                    return LanChatStartResult.Failed("Bluetooth transport is unavailable.");
+                break;
+            default:
+                // Host-provided transport (e.g. LoRa/Meshtastic): resolve the outbound transport
+                // for the peer's transport address (its mesh address).
+                hostTransport = context?.ResolveOutboundTransport?.Invoke(peer.SourceAddress);
+                if (hostTransport == null)
+                    return LanChatStartResult.Failed(
+                        "Транспорт пира не запущен (например, включите LoRa/Meshtastic в настройках).");
+                break;
         }
 
         var idShort = peer.NetworkId.ToShortString();
         var existing = await chats.FindChatByPeerNetworkIdAsync(user.Id, idShort).ConfigureAwait(false);
         if (existing != null)
         {
+            if (hostTransport != null)
+                return LanChatStartResult.AlreadyExists(existing);
+
             var seenIp = peer.TransportKind == TransportKind.Bluetooth
                 ? BluetoothTransportAddress.ToMacString(peer.SourceAddress.Data)
                 : UdpTransportAddress.ToIPEndPoint(peer.SourceAddress).Address.ToString();
@@ -68,7 +72,7 @@ public static class LanChatStartFromDiscovery
             return LanChatStartResult.AlreadyExists(fresh ?? existing);
         }
 
-        var dest = peer.TransportKind == TransportKind.Bluetooth
+        var dest = hostTransport != null || peer.TransportKind == TransportKind.Bluetooth
             ? peer.SourceAddress
             : UdpTransportAddress.FromIPEndPoint(
                 new IPEndPoint(UdpTransportAddress.ToIPEndPoint(peer.SourceAddress).Address,
@@ -86,71 +90,87 @@ public static class LanChatStartFromDiscovery
         var invite = ChatInviteCodec.Build(user.Nickname, nid,
             RsaKeySerializer.SerializePublic(auth.GetCurrentPublicKey()), host, ChatInviteCodec.InviteUdpPort);
 
-        var sharedFactory = context?.UdpTransportFactory;
-        if (sharedFactory != null)
+        if (hostTransport != null)
         {
-            if (peer.TransportKind == TransportKind.Udp)
+            // One ShortP2P datagram to the peer's mesh address; the transport chunks and retries it.
+            // Failure to transmit (e.g. LoRa region unset, port closed) is a user-facing condition.
+            try
             {
-                var udp = sharedFactory.Acquire(IPAddress.Any, ChatInviteCodec.InviteUdpPort);
-                try
-                {
-                    await udp.StartAsync(cancellationToken).ConfigureAwait(false);
-                    await udp.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    try
-                    {
-                        await sharedFactory.ReleaseAsync(udp, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-                }
+                await hostTransport.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
             }
-            else
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var bt = context!.BluetoothTransport!;
-                await bt.StartAsync(cancellationToken).ConfigureAwait(false);
-                await bt.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
+                return LanChatStartResult.Failed(ex.Message);
             }
         }
         else
         {
-            if (context?.StopInviteListenerAsync != null)
-                await context.StopInviteListenerAsync(cancellationToken).ConfigureAwait(false);
-            var udp = UdpTransport.CreateUdpTransport(IPAddress.Any, ChatInviteCodec.InviteUdpPort);
-            try
+            var sharedFactory = context?.UdpTransportFactory;
+            if (sharedFactory != null)
             {
-                await udp.StartAsync(cancellationToken).ConfigureAwait(false);
-                if (peer.TransportKind == TransportKind.Bluetooth)
+                if (peer.TransportKind == TransportKind.Udp)
+                {
+                    var udp = sharedFactory.Acquire(IPAddress.Any, ChatInviteCodec.InviteUdpPort);
+                    try
+                    {
+                        await udp.StartAsync(cancellationToken).ConfigureAwait(false);
+                        await udp.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            await sharedFactory.ReleaseAsync(udp, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+                    }
+                }
+                else
                 {
                     var bt = context!.BluetoothTransport!;
                     await bt.StartAsync(cancellationToken).ConfigureAwait(false);
                     await bt.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
                 }
-                else
-                {
-                    await udp.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
-                }
             }
-            finally
+            else
             {
+                if (context?.StopInviteListenerAsync != null)
+                    await context.StopInviteListenerAsync(cancellationToken).ConfigureAwait(false);
+                var udp = UdpTransport.CreateUdpTransport(IPAddress.Any, ChatInviteCodec.InviteUdpPort);
                 try
                 {
-                    await udp.StopAsync(cancellationToken).ConfigureAwait(false);
+                    await udp.StartAsync(cancellationToken).ConfigureAwait(false);
+                    if (peer.TransportKind == TransportKind.Bluetooth)
+                    {
+                        var bt = context!.BluetoothTransport!;
+                        await bt.StartAsync(cancellationToken).ConfigureAwait(false);
+                        await bt.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await udp.SendAsync(invite, dest, cancellationToken).ConfigureAwait(false);
+                    }
                 }
-                catch
+                finally
                 {
-                    // ignore
-                }
+                    try
+                    {
+                        await udp.StopAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
 
-                if (context?.EnsureInviteListenerAsync != null)
-                {
-                    var u = auth.CurrentUser;
-                    if (u != null)
-                        await context.EnsureInviteListenerAsync(u, cancellationToken).ConfigureAwait(false);
+                    if (context?.EnsureInviteListenerAsync != null)
+                    {
+                        var u = auth.CurrentUser;
+                        if (u != null)
+                            await context.EnsureInviteListenerAsync(u, cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
         }
@@ -236,57 +256,5 @@ public static class LanChatStartFromDiscovery
             .ConfigureAwait(false);
 
         return LanChatStartResult.Created(chat);
-    }
-}
-
-public enum LanChatStartKind
-{
-    AlreadyExists,
-    Created,
-    WaitingForPeer,
-    Failed
-}
-
-public sealed class LanChatStartResult
-{
-    public LanChatStartKind Kind { get; private init; }
-    public ChatEntity? Chat { get; private init; }
-    public string? Message { get; private init; }
-
-    public static LanChatStartResult AlreadyExists(ChatEntity chat)
-    {
-        return new LanChatStartResult
-        {
-            Kind = LanChatStartKind.AlreadyExists,
-            Chat = chat
-        };
-    }
-
-    public static LanChatStartResult Created(ChatEntity chat)
-    {
-        return new LanChatStartResult
-        {
-            Kind = LanChatStartKind.Created,
-            Chat = chat
-        };
-    }
-
-    public static LanChatStartResult WaitingForPeer()
-    {
-        return new LanChatStartResult
-        {
-            Kind = LanChatStartKind.WaitingForPeer,
-            Message =
-                "Приглашение отправлено. Чат появится в списке, когда пир ответит (при необходимости откройте список чатов позже)."
-        };
-    }
-
-    public static LanChatStartResult Failed(string message)
-    {
-        return new LanChatStartResult
-        {
-            Kind = LanChatStartKind.Failed,
-            Message = message
-        };
     }
 }

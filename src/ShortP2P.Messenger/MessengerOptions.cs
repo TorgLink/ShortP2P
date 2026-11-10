@@ -24,4 +24,10 @@ public sealed class MessengerOptions
     ///     Верхняя граница количества индексов чанков в одном NACK.
     /// </summary>
     public int MaxNackChunkIndices { get; set; } = 96;
+
+    /// <summary>
+    ///     How long <c>SendBinaryAsyncExpectAck</c> waits for the peer delivery ACK.
+    ///     LoRa / slow links need tens of seconds; default 30 s.
+    /// </summary>
+    public TimeSpan DeliveryAckTimeout { get; set; } = TimeSpan.FromSeconds(30);
 }

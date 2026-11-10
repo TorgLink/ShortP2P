@@ -88,7 +88,9 @@ public sealed class MessengerService(
     }
 
     /// <summary>
-    ///     Шифрует сообщение один раз и отправляет чанки параллельно на все адреса.
+    ///     Encrypts once, fans the chunks out to every destination, then waits for the peer delivery ACK.
+    ///     Failures on individual destinations are tolerated as long as at least one send path succeeds;
+    ///     missing ACK within <see cref="MessengerOptions.DeliveryAckTimeout"/> fails the call.
     /// </summary>
     public async ValueTask SendBinaryAsyncExpectAck(byte[] data, IReadOnlyList<TransportAddress> destinationsInOrder, CancellationToken cancellationToken = default)
     {
@@ -101,14 +103,49 @@ public sealed class MessengerService(
                 nameof(data));
 
         var messageId = Guid.NewGuid();
-        var prepared = await PrepareEncryptedChunksAsync(data, messageId, cancellationToken).ConfigureAwait(false);
+        var waiter = new AckWaiter();
+        _ackWaiters[messageId] = waiter;
+        try
+        {
+            var prepared = await PrepareEncryptedChunksAsync(data, messageId, cancellationToken).ConfigureAwait(false);
 
-        var sendTasks = destinationsInOrder.Select(dest => SendPreparedChunksToDestinationAsync(
-            prepared, messageId, dest, cancellationToken));
+            var sendErrors = new ConcurrentBag<Exception>();
+            var sendTasks = destinationsInOrder.Select(async dest =>
+            {
+                try
+                {
+                    await SendPreparedChunksToDestinationAsync(prepared, messageId, dest, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    sendErrors.Add(ex);
+                }
+            });
 
-        await Task.WhenAll(sendTasks).ConfigureAwait(false);
+            await Task.WhenAll(sendTasks).ConfigureAwait(false);
 
-        CacheOutboundChunks(messageId, destinationsInOrder[0], prepared);
+            if (sendErrors.Count >= destinationsInOrder.Count)
+                throw new IOException(
+                    $"Failed to send message on all {destinationsInOrder.Count} destination(s).",
+                    sendErrors.ToArray()[0]);
+
+            CacheOutboundChunks(messageId, destinationsInOrder[0], prepared);
+
+            try
+            {
+                await waiter.Task.WaitAsync(_options.DeliveryAckTimeout, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException(
+                    $"Delivery ACK for {messageId:N} not received within {_options.DeliveryAckTimeout.TotalSeconds:0}s.");
+            }
+        }
+        finally
+        {
+            _ackWaiters.TryRemove(messageId, out _);
+        }
     }
 
     private async ValueTask SendChunksForMessageAsync(byte[] data, Guid messageId, TransportAddress destination,
@@ -156,19 +193,8 @@ public sealed class MessengerService(
     private async Task SendPreparedChunksToDestinationAsync(byte[][] encryptedChunks, Guid messageId,
         TransportAddress destination, CancellationToken cancellationToken)
     {
-        try
-        {
-            for (var i = 0; i < encryptedChunks.Length; i++)
-                await _sendCipherAsync(encryptedChunks[i], destination, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            // TODO: логирование
-        }
-        catch (Exception)
-        {
-            // TODO: логирование
-        }
+        for (var i = 0; i < encryptedChunks.Length; i++)
+            await _sendCipherAsync(encryptedChunks[i], destination, cancellationToken).ConfigureAwait(false);
     }
 
     private void CacheOutboundChunks(Guid messageId, TransportAddress destination, byte[][] encryptedChunks)

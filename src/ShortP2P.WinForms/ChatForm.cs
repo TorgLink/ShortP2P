@@ -599,6 +599,14 @@ public sealed class ChatForm : Form
 
         try
         {
+            if (_p2PSession.IsMeshtasticPathActive)
+            {
+                MessageBox.Show(this,
+                    "Передача видео по пути Meshtastic пока запрещена.",
+                    "Видео", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             if (!VideoAttachHelper.TryGetMimeFromExtension(dlg.FileName, out _))
             {
                 MessageBox.Show(this, "Допустим только .ogv.", "Видео", MessageBoxButtons.OK,
@@ -658,6 +666,14 @@ public sealed class ChatForm : Form
         if (_p2PSession == null)
             return;
         ClearDeliveryIssue();
+        if (_p2PSession.IsMeshtasticPathActive)
+        {
+            MessageBox.Show(this,
+                "Передача видео по пути Meshtastic пока запрещена.",
+                "Видео", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         using var win = new CameraRecordForm(_appSettings.Current.TrafficQuality,
             _appSettings.Current.VideoInputDeviceId);
         if (await win.ShowDialogAsync(this) != DialogResult.OK || win.Result == null)

@@ -54,6 +54,23 @@ public static class PeerTransportEndpoints
         return Serialize(list);
     }
 
+    /// <summary>Replace all endpoints of <paramref name="kind"/> with <paramref name="replacements"/> (same kind expected).</summary>
+    public static string ReplaceKind(IEnumerable<TransportAddress> endpoints, byte kind,
+        IEnumerable<TransportAddress> replacements)
+    {
+        var list = endpoints.Where(e => e.Kind != kind).ToList();
+        foreach (var ep in replacements)
+        {
+            if (ep.Kind != kind)
+                continue;
+            if (list.Any(x => x.Kind == ep.Kind && x.Data.AsSpan().SequenceEqual(ep.Data)))
+                continue;
+            list.Add(ep);
+        }
+
+        return Serialize(list);
+    }
+
     public static string Serialize(IEnumerable<TransportAddress> endpoints)
     {
         var arr = endpoints

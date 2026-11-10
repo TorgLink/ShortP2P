@@ -458,6 +458,28 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
         return true;
     }
 
+    /// <summary>
+    ///     Replace all peer endpoints of <paramref name="kind"/> (e.g. Meshtastic = 5) with
+    ///     <paramref name="ofKind"/>. Returns true when the stored JSON changed.
+    /// </summary>
+    public async Task<bool> ReplaceChatTransportEndpointsOfKindAsync(
+        int chatId, byte kind, IReadOnlyList<TransportAddress> ofKind)
+    {
+        var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
+        var chat = await conn.FindAsync<ChatEntity>(chatId).ConfigureAwait(false);
+        if (chat == null)
+            return false;
+
+        var newEndpointsJson = PeerTransportEndpoints.ReplaceKind(PeerTransportEndpoints.Parse(chat), kind, ofKind);
+        if (string.Equals(newEndpointsJson, chat.PeerEndpointsJson ?? "", StringComparison.Ordinal))
+            return false;
+
+        chat.PeerEndpointsJson = newEndpointsJson;
+        chat.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
+        await conn.UpdateAsync(chat).ConfigureAwait(false);
+        return true;
+    }
+
     public Task UpdateChatDeliveryPathAsync(int chatId, int deliveryPath) =>
         _db.WriteAsync(conn => conn.ExecuteAsync(
             "UPDATE chats SET DeliveryPath = ? WHERE Id = ?", deliveryPath, chatId));

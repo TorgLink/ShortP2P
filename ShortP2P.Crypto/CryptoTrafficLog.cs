@@ -25,20 +25,21 @@ public static class CryptoTrafficLog
     public static void LogEncryptPlaintext(ILogger? logger, ReadOnlySpan<byte> plaintext)
     {
 #if DEBUG
-        if (logger?.IsEnabled(LogLevel.Debug) != true)
+        // Trace only: hex dumps are huge and flood async NLog queues (Discard drops LoRa TX Info).
+        if (logger?.IsEnabled(LogLevel.Trace) != true)
             return;
 
-        logger.LogDebug("CRYPT encrypt plaintext: {Payload}", FormatPayloadHex(plaintext));
+        logger.LogTrace("CRYPT encrypt plaintext: {Payload}", FormatPayloadHex(plaintext));
 #endif
     }
 
     public static void LogDecryptPlaintext(ILogger? logger, ReadOnlySpan<byte> plaintext)
     {
 #if DEBUG
-        if (logger?.IsEnabled(LogLevel.Debug) != true)
+        if (logger?.IsEnabled(LogLevel.Trace) != true)
             return;
 
-        logger.LogDebug("CRYPT decrypt plaintext: {Payload}", FormatPayloadHex(plaintext));
+        logger.LogTrace("CRYPT decrypt plaintext: {Payload}", FormatPayloadHex(plaintext));
 #endif
     }
 }

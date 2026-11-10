@@ -9,6 +9,7 @@ using ShortP2P.Crypto;
 using ShortP2P.Client;
 using ShortP2P.Client.Bluetooth;
 using ShortP2P.Client.ChatMedia;
+using ShortP2P.Client.ChatMedia.Vocabulary;
 using ShortP2P.Client.Data;
 using ShortP2P.Client.ProfileBackup;
 using ShortP2P.Client.Routing;
@@ -116,6 +117,16 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         Application.SetDefaultFont(new Font("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Point));
         hostLogger.LogInformation("WinForms application started");
+
+        // SMT-3: load ShortP2P.Vocabulary packs (submodule / sibling repo) once at startup.
+        try
+        {
+            VocabularyHost.TryInitializeNearApp(Path.Combine(appRoot, "vocabularies"), hostLogger);
+        }
+        catch (Exception ex)
+        {
+            hostLogger.LogWarning(ex, "VocabularyHost initialization failed");
+        }
 
         var appSettings = provider.GetRequiredService<AppSettingsStore>();
         try

@@ -15,4 +15,7 @@ public static class TransportKind
 
     /// <summary>Peer discovered via HTTPS messenger server (GetClients), without a direct UDP/BT address.</summary>
     public const byte MessengerServer = 4;
+
+    /// <summary>LoRa / Meshtastic host transport (ShortP2P.LoRa). Must stay aligned with ShortP2P.LoRa.TransportKind.Meshtastic.</summary>
+    public const byte Meshtastic = 5;
 }
