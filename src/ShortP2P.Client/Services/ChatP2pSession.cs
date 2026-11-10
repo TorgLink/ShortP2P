@@ -45,6 +45,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
     public const int UdpFallbackLatestUnsentCount = 20;
     private static readonly TimeSpan DecryptRecoveryCooldown = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan InviteResyncCooldown = TimeSpan.FromSeconds(3);
+    /// <summary>Successful encrypted TX ACK / inbound decrypt keeps AES across missed crypto probes.</summary>
+    private static readonly TimeSpan EncryptedPathProofFreshness = TimeSpan.FromSeconds(120);
     private readonly SemaphoreSlim _cryptoProbeLoopLock = new(1, 1);
     private readonly P2pCryptoSessionCache _cryptoSessionCache;
     private readonly SemaphoreSlim _flushPendingSem = new(1, 1);
@@ -95,6 +97,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private static readonly TimeSpan LeaderHandshakeResendMinInterval = TimeSpan.FromSeconds(15);
 
     private DateTimeOffset _lastDecryptRecoveryUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastEncryptedPathProofUtc = DateTimeOffset.MinValue;
     private MessengerService? _messenger;
     private CancellationTokenSource? _outboundCts;
 
@@ -546,6 +549,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         if (!IsTransportEnabled(from.Kind))
             return false;
+
+        // Host transports (LoRa/Meshtastic): MeshId ≠ NetworkId. Never accept solely because a
+        // stale MeshId remains in _peerEndpoints after the radio node moved to another subscriber.
+        if (from.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+            return IsHostTransportAddressForThisPeer(from);
+
         if (_peerEndpoints.Any(x => x.Kind == from.Kind && x.Data.AsSpan().SequenceEqual(from.Data)))
             return true;
         try
@@ -564,11 +573,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
             if (from.Kind == TransportKind.Bluetooth) return true;
 
-            // Host transports (LoRa/Meshtastic): only frames from THIS chat's peer MeshId.
-            // A blanket accept made every open chat consume the same 0x01 and create bogus sessions.
-            if (from.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
-                return IsHostTransportAddressForThisPeer(from);
-
             if (!string.IsNullOrEmpty(_chat.RelayRouteBlob))
                 return true;
         }
@@ -582,13 +586,11 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     /// <summary>
     ///     True when the host transport maps <paramref name="from"/> to this chat's peer NetworkId
-    ///     (MeshDirectory / recent presence). Pulls fresh addresses before comparing.
+    ///     (live MeshDirectory ownership). MeshId and NetworkId are different layers.
     /// </summary>
     private bool IsHostTransportAddressForThisPeer(TransportAddress from)
     {
         MergeAdditionalTransportPeerAddresses();
-        if (_peerEndpoints.Any(x => x.Kind == from.Kind && x.Data.AsSpan().SequenceEqual(from.Data)))
-            return true;
 
         var peerShort = _chat.PeerNetworkIdShort?.Trim();
         var provider = _runtime.AdditionalTransports;
@@ -597,10 +599,28 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
         try
         {
+            if (provider.TryResolvePeerNetworkId(from, out var ownerShort))
+            {
+                if (ChatRepository.PeerNetworkIdsEqual(ownerShort, peerShort))
+                    return true;
+                // MeshId confirmed elsewhere — never accept for this chat.
+                return false;
+            }
+
+            // Fallback: destinations currently advertised for this peer NetworkId only.
             foreach (var ep in provider.GetPeerAddresses(peerShort))
             {
                 if (ep.Kind == from.Kind && ep.Data.AsSpan().SequenceEqual(from.Data))
                     return true;
+            }
+
+            // Sticky chat-row / in-memory endpoints: presence may be skipped under duty cycle,
+            // but we already TX'd 0x04 / invites to this MeshId for this peer.
+            if (_peerEndpoints.Any(ep =>
+                    ep.Kind == from.Kind && ep.Data.AsSpan().SequenceEqual(from.Data)))
+            {
+                TryRememberAdditionalPeer(from);
+                return true;
             }
         }
         catch (Exception ex)
@@ -1034,6 +1054,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     /// <summary>
     ///     Host mesh directory (e.g. LoRa): bind peer NetworkId to the radio address after cipher attribution.
+    ///     Skips when the MeshId is already owned by a different NetworkId (module reused by another subscriber).
     /// </summary>
     private void TryRememberAdditionalPeer(TransportAddress from)
     {
@@ -1042,9 +1063,21 @@ public sealed class ChatP2PSession : IAsyncDisposable
         var provider = _runtime.AdditionalTransports;
         if (provider == null || !provider.IsEnabled(from.Kind))
             return;
+        var peerShort = _chat.PeerNetworkIdShort?.Trim();
+        if (string.IsNullOrWhiteSpace(peerShort))
+            return;
         try
         {
-            var wire = CompressedNetworkId.FromShortString(_chat.PeerNetworkIdShort).ToWireBytes();
+            if (provider.TryResolvePeerNetworkId(from, out var ownerShort) &&
+                !ChatRepository.PeerNetworkIdsEqual(ownerShort, peerShort))
+            {
+                _logger.LogDebug(
+                    "Chat {ChatId}: skip RememberPeer — MeshId owned by {Owner}, chat peer is {Peer}",
+                    _chat.Id, ownerShort, peerShort);
+                return;
+            }
+
+            var wire = CompressedNetworkId.FromShortString(peerShort).ToWireBytes();
             provider.RememberPeer(wire, from);
         }
         catch (Exception ex)
@@ -1088,6 +1121,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         var shouldNotify = false;
         if (ChatWireCodec.TryParse(payload, out var wire) && wire != null)
         {
+            // Reaching plaintext wire means AES decrypt already succeeded on this path.
+            NoteEncryptedPathProof(cancellationToken);
             switch (wire)
             {
                 case ChatWireText t:
@@ -2070,6 +2105,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         .ConfigureAwait(false);
                     RaiseMessagesChanged();
                     await _messenger.SendBinaryAsyncExpectAck(wire, dests, ct).ConfigureAwait(false);
+                    NoteEncryptedPathProof(ct);
                     _logger.LogInformation(
                         "Chat {ChatId}: delivery ACK received for message {MessageId}",
                         _chat.Id, messageId);
@@ -2080,6 +2116,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         "Chat {ChatId}: P2P relay send message {MessageId} via {Endpoint}",
                         _chat.Id, messageId, FormatTransportAddress(_peerAddress!));
                     await _messenger.SendBinaryAsync(wire, _peerAddress!, ct).ConfigureAwait(false);
+                    NoteEncryptedPathProof(ct);
                 }
             },
             null,
@@ -2131,6 +2168,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 {
                     await _messenger.SendBinaryAsync(wire, _peerAddress!, ct).ConfigureAwait(false);
                 }
+
+                NoteEncryptedPathProof(ct);
             },
             null,
             false,
@@ -2174,6 +2213,13 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         var firstTime = !_cryptoProbeRoundTripOk;
         _cryptoProbeRoundTripOk = true;
+        _lastEncryptedPathProofUtc = DateTimeOffset.UtcNow;
+        lock (_sync)
+        {
+            // Unblock an in-flight test_send waiter when proof arrives via delivery ACK / inbound decrypt.
+            _cryptoProbeOkAwaiter?.TrySetResult(true);
+        }
+
         RefreshHandshakeStatus();
         if (!firstTime || _userInfoSharedAfterEstablish)
             return;
@@ -2181,6 +2227,27 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _ = ShareLocalUserInfoAfterEstablishAsync(cancellationToken);
         _ = ShareVocabOfferAfterEstablishAsync(cancellationToken);
     }
+
+    /// <summary>
+    ///     Live encrypted traffic (peer delivery ACK or decrypted inbound) proves the AES path.
+    ///     On LoRa the dedicated crypto probe is often lost to duty-cycle/chunking; do not wipe keys
+    ///     while this proof is fresh.
+    /// </summary>
+    private void NoteEncryptedPathProof(CancellationToken cancellationToken)
+    {
+        _lastEncryptedPathProofUtc = DateTimeOffset.UtcNow;
+        if (_cryptoProbeRoundTripOk)
+            return;
+        if (!_handshakeWeInitiated && !TryGetCryptoSession(out _))
+            return;
+        MarkCryptoSessionEstablished(cancellationToken);
+        _logger.LogInformation(
+            "Chat {ChatId}: crypto session confirmed via live encrypted traffic (role={Role})",
+            _chat.Id, SessionRoleLabel());
+    }
+
+    private bool HasFreshEncryptedPathProof() =>
+        DateTimeOffset.UtcNow - _lastEncryptedPathProofUtc < EncryptedPathProofFreshness;
 
     private async Task ShareLocalUserInfoAfterEstablishAsync(CancellationToken cancellationToken)
     {
@@ -2787,6 +2854,46 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _logger.LogWarning("Chat {ChatId}: decrypt failure, starting crypto recovery (role={Role})",
                 _chat.Id, SessionRoleLabel());
 
+            // Live ACKs/decrypts prove the current AES path; a lone bad frame (often stale after
+            // LoRa reordering) must not wipe keys the peer is still using successfully.
+            if (HasFreshEncryptedPathProof() && TryGetCryptoSession(out _) && _messenger != null)
+            {
+                _logger.LogInformation(
+                    "Chat {ChatId}: decrypt failure soft recovery — keeping AES (fresh encrypted path proof)",
+                    _chat.Id);
+                if (!IsCryptoSessionLeader())
+                {
+                    try
+                    {
+                        await SendSessionSetupRequestPacketAsync(token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Chat {ChatId}: follower 0x04 after decrypt failure failed", _chat.Id);
+                    }
+
+                    return;
+                }
+
+                byte[]? softResend;
+                lock (_sync)
+                    softResend = _lastLeaderHandshakeFrame is { Length: > 0 } frame ? frame : null;
+                if (softResend != null)
+                {
+                    try
+                    {
+                        _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
+                        await SendRouteRawAsync(softResend, token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Chat {ChatId}: leader soft 0x01 after decrypt failure failed", _chat.Id);
+                    }
+
+                    return;
+                }
+            }
+
             await ResetCryptoStateAsync(token).ConfigureAwait(false);
             if (!IsCryptoSessionLeader())
             {
@@ -2839,6 +2946,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _handshakeWeInitiated = false;
             _cryptoProbeRoundTripOk = false;
             _userInfoSharedAfterEstablish = false;
+            _lastEncryptedPathProofUtc = DateTimeOffset.MinValue;
             _messenger = null;
             _pendingInboundCipher = null;
             _pendingInboundCipherFrom = null;
@@ -2954,6 +3062,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     _chat.Id, frame, packet.Length, FormatTransportAddress(dest));
                 await transport.SendAsync(packet, dest, cancellationToken).ConfigureAwait(false);
                 anySuccess = true;
+                // Bind MeshId → peer NetworkId on outbound so inbound 0x01/0x02 (no NetworkId in frame)
+                // are accepted even when presence 0x31 was skipped under duty cycle.
+                if (dest.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+                    TryRememberAdditionalPeer(dest);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2990,6 +3102,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             _chat.Id, cipherPayload.Length, FormatTransportAddress(destination));
         await message.SendAsync(new TransportReceiveMessage(cipherPayload, destination), destination,
             cancellationToken).ConfigureAwait(false);
+        if (destination.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+            TryRememberAdditionalPeer(destination);
     }
 
     private ITransport? ResolveOutbound(TransportAddress destination)
@@ -3212,6 +3326,21 @@ public sealed class ChatP2PSession : IAsyncDisposable
                             _chat.Id, softProbeRetries, maxSoftProbeRetries);
                         _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
                         await SendRouteRawAsync(softResend, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Probe ACKs are often lost on LoRa while chat ACKs still succeed — keep AES.
+                    if (HasFreshEncryptedPathProof()
+                        && TryGetCryptoSession(out _)
+                        && _messenger != null
+                        && _lastLeaderHandshakeFrame is { Length: > 0 } keepFrame)
+                    {
+                        _logger.LogInformation(
+                            "Chat {ChatId}: crypto probe hard reset skipped — fresh encrypted path proof; soft-resending 0x01",
+                            _chat.Id);
+                        _lastLeaderHandshakeSentUtc = DateTimeOffset.UtcNow;
+                        await SendRouteRawAsync(keepFrame, cancellationToken).ConfigureAwait(false);
+                        softProbeRetries = 0;
                         continue;
                     }
 
@@ -3837,6 +3966,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// <summary>
     ///     Pull MeshDirectory / host-transport addresses for this peer into the live route so session
     ///     setup can leave on LoRa even before chat-row endpoint sync lands.
+    ///     Also drops stale Meshtastic MeshIds that no longer belong to this peer NetworkId.
     /// </summary>
     private void MergeAdditionalTransportPeerAddresses()
     {
@@ -3856,8 +3986,29 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         }
 
-        if (extras.Count == 0)
-            return;
+        // Prune host-transport endpoints that the directory no longer attributes to this NetworkId.
+        _peerEndpoints.RemoveAll(ep =>
+        {
+            if (ep.Kind is TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer)
+                return false;
+            if (!provider.IsEnabled(ep.Kind))
+                return false;
+            try
+            {
+                // Drop only when MeshId is confirmed owned by another NetworkId.
+                // Do not prune on temporary directory emptiness or a newer alternate MeshId —
+                // that wiped sticky LoRa routes and rejected inbound 0x01/0x02.
+                if (provider.TryResolvePeerNetworkId(ep, out var owner) &&
+                    !ChatRepository.PeerNetworkIdsEqual(owner, peerShort))
+                    return true;
+            }
+            catch
+            {
+                // keep endpoint if resolve throws
+            }
+
+            return false;
+        });
 
         foreach (var ep in extras)
         {
@@ -3910,6 +4061,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _peerEndpoints.RemoveAll(ep =>
             ep.Kind == endpoint.Kind && ep.Data.AsSpan().SequenceEqual(endpoint.Data));
         _peerEndpoints.Insert(0, endpoint);
+        if (endpoint.Kind is not (TransportKind.Udp or TransportKind.Bluetooth or TransportKind.MessengerServer))
+            TryRememberAdditionalPeer(endpoint);
     }
 
     private async Task TryBleFallbackAsync(CancellationToken cancellationToken)

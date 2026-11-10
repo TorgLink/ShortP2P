@@ -153,6 +153,7 @@ public sealed class LocalNetworkScanner(
         Require.NotNull(clients);
         var localPeer = _localPeer;
         var keepIds = new HashSet<CompressedNetworkId>();
+        var changed = false;
         foreach (var key in _messengerClientIds.Keys.ToArray())
             _messengerClientIds.TryRemove(key, out _);
 
@@ -179,7 +180,10 @@ public sealed class LocalNetworkScanner(
                 MessengerServerOnline: entry.Online,
                 AboutMe: entry.AboutMe ?? "",
                 IsBot: entry.IsBot);
+            _entries.TryGetValue(id, out var before);
             var stored = _entries.AddOrUpdate(id, peer, (_, existing) => MergeDiscoveredPeers(existing, peer));
+            if (before is null || IsVisibleDirectoryChange(before, stored))
+                changed = true;
             if (entry.Online && stored.TransportKind == TransportKind.MessengerServer && !stored.IsBot)
                 SchedulePeerProfileRequest(stored);
         }
@@ -190,11 +194,13 @@ public sealed class LocalNetworkScanner(
                 continue;
             if (keepIds.Contains(kv.Key) || kv.Value.IsBot)
                 continue;
-            _entries.TryRemove(kv.Key, out _);
+            if (_entries.TryRemove(kv.Key, out _))
+                changed = true;
         }
 
         RebuildSnapshot();
-        ClientsChanged?.Invoke(this, EventArgs.Empty);
+        if (changed)
+            ClientsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -206,6 +212,7 @@ public sealed class LocalNetworkScanner(
         Require.NotNull(bots);
         var localPeer = _localPeer;
         var keepIds = new HashSet<CompressedNetworkId>();
+        var changed = false;
 
         foreach (var entry in bots)
         {
@@ -229,7 +236,10 @@ public sealed class LocalNetworkScanner(
                 AboutMe: about,
                 IsBot: true,
                 MessagePublicKey: pub);
-            _entries.AddOrUpdate(id, peer, (_, existing) => MergeDiscoveredPeers(existing, peer));
+            _entries.TryGetValue(id, out var before);
+            var stored = _entries.AddOrUpdate(id, peer, (_, existing) => MergeDiscoveredPeers(existing, peer));
+            if (before is null || IsVisibleDirectoryChange(before, stored))
+                changed = true;
         }
 
         foreach (var kv in _entries.ToArray())
@@ -240,15 +250,18 @@ public sealed class LocalNetworkScanner(
             if (kv.Value.TransportKind == TransportKind.MessengerServer &&
                 !_messengerClientIds.ContainsKey(kv.Key))
             {
-                _entries.TryRemove(kv.Key, out _);
+                if (_entries.TryRemove(kv.Key, out _))
+                    changed = true;
                 continue;
             }
 
             _entries[kv.Key] = kv.Value with { IsBot = false };
+            changed = true;
         }
 
         RebuildSnapshot();
-        ClientsChanged?.Invoke(this, EventArgs.Empty);
+        if (changed)
+            ClientsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -1117,11 +1130,61 @@ public sealed class LocalNetworkScanner(
         discoveryPingStore?.Write(
             new PeerIdentity(peer.Nickname, peer.NetworkId, peer.PeerDataUdpPort),
             peer.SourceAddress, peer.LastSeenUtc);
-        _entries.AddOrUpdate(peer.NetworkId, peer, (_, existing) => MergeDiscoveredPeers(existing, peer));
+
+        _entries.TryGetValue(peer.NetworkId, out var before);
+        var merged = _entries.AddOrUpdate(peer.NetworkId, peer, (_, existing) => MergeDiscoveredPeers(existing, peer));
         if (_scanSessionActive)
             return;
+
+        // Always refresh snapshot LastSeen; raise ClientsChanged only on visible directory changes
+        // or when a peer returns after a quiet gap (online transition) — not on every presence tick.
         RebuildSnapshot();
+        if (!ShouldRaiseClientsChanged(before, merged))
+            return;
         ClientsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    ///     True for new peers, identity/route/profile changes, or a return after
+    ///     <see cref="DirectoryNotifyQuietPeriod"/> — not for LastSeen-only refreshes.
+    /// </summary>
+    private bool ShouldRaiseClientsChanged(DiscoveredLocalPeer? before, DiscoveredLocalPeer after)
+    {
+        if (before is null)
+            return true;
+        if (IsVisibleDirectoryChange(before, after))
+            return true;
+        return DateTimeOffset.UtcNow - before.LastSeenUtc > DirectoryNotifyQuietPeriod;
+    }
+
+    private TimeSpan DirectoryNotifyQuietPeriod =>
+        TimeSpan.FromTicks(Math.Max(
+            TimeSpan.FromSeconds(15).Ticks,
+            routingSettings.LinkTechnology.GetPresencePingPeriod(routingSettings.TrafficQuality).Ticks * 2));
+
+    private static bool IsVisibleDirectoryChange(DiscoveredLocalPeer before, DiscoveredLocalPeer after)
+    {
+        if (before.TransportKind != after.TransportKind)
+            return true;
+        if (before.PeerDataUdpPort != after.PeerDataUdpPort)
+            return true;
+        if (before.MessengerServerOnline != after.MessengerServerOnline)
+            return true;
+        if (before.IsBot != after.IsBot)
+            return true;
+        if (before.AdvertisedLinkTechnology != after.AdvertisedLinkTechnology)
+            return true;
+        if (before.AdvertisedCapabilities != after.AdvertisedCapabilities)
+            return true;
+        if (!string.Equals(before.Nickname, after.Nickname, StringComparison.Ordinal))
+            return true;
+        if (!string.Equals(before.AboutMe, after.AboutMe, StringComparison.Ordinal))
+            return true;
+        if (!string.Equals(before.MessagePublicKey, after.MessagePublicKey, StringComparison.Ordinal))
+            return true;
+        if (before.SourceAddress.Kind != after.SourceAddress.Kind)
+            return true;
+        return !before.SourceAddress.Data.AsSpan().SequenceEqual(after.SourceAddress.Data);
     }
 
     private void RebuildSnapshot()
