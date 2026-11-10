@@ -41,6 +41,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
     private readonly IPeerProfileStore? _peerProfiles;
     private readonly ILocalPeerProfileSource? _localProfile;
     private readonly ILogger<MessengerServerSyncService> _logger;
+    private readonly ServerCipherSessionStore _serverSessions;
     private readonly object _startGate = new();
     private readonly SemaphoreSlim _ingestGate = new(1, 1);
     private readonly ConcurrentDictionary<long, string> _pendingForwardProfileNonces = new();
@@ -66,7 +67,8 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         IBotVersionRepository? botVersions = null,
         IPeerProfileStore? peerProfiles = null,
         ILocalPeerProfileSource? localProfile = null,
-        ILogger<MessengerServerSyncService>? logger = null)
+        ILogger<MessengerServerSyncService>? logger = null,
+        ServerCipherSessionStore? serverSessions = null)
     {
         _auth = auth ?? throw new global::System.ArgumentNullException(nameof(auth));
         _chats = chats ?? throw new global::System.ArgumentNullException(nameof(chats));
@@ -76,6 +78,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         _peerProfiles = peerProfiles;
         _localProfile = localProfile;
         _logger = logger ?? NullLogger<MessengerServerSyncService>.Instance;
+        _serverSessions = serverSessions ?? ServerCipherSessionStore.Shared;
     }
 
     /// <summary>Optional: refresh LAN scan AboutMe after a server-forward profile reply.</summary>
@@ -793,14 +796,11 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             return null;
         }
 
-        string encrypted;
-        try
+        if (latest.IsBot)
         {
-            encrypted = MessengerServerPayloadCodec.EncryptToBase64(wire, peerKey);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to encrypt server payload for chat {ChatId}", latest.Id);
+            _logger.LogDebug(
+                "Send skipped: chat {ChatId} is a bot — use TryDeliverBotWireAsync",
+                latest.Id);
             return null;
         }
 
@@ -808,11 +808,15 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (peerId.Length == 0)
             return null;
 
-        if (latest.IsBot)
+        string encrypted;
+        try
         {
-            _logger.LogDebug(
-                "Send skipped: chat {ChatId} is a bot — use TryDeliverBotWireAsync",
-                latest.Id);
+            encrypted = Convert.ToBase64String(
+                MessengerServerPayloadCodec.EncryptForSession(wire, peerKey, peerId, _serverSessions));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to encrypt server payload for chat {ChatId}", latest.Id);
             return null;
         }
 
@@ -871,6 +875,68 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             "SendMessage: all targets failed for chat {ChatId} peer={PeerId} tried={Count}",
             latest.Id, peerId, targets.Count);
         return null;
+    }
+
+    /// <summary>
+    /// Posts an already-built session envelope (probe acknowledgement or re-key notice). Not chat history.
+    /// </summary>
+    public async Task TryDeliverRawEnvelopeAsync(
+        string peerNetworkId,
+        UserEntity user,
+        byte[] envelope,
+        CancellationToken cancellationToken = default)
+    {
+        Require.NotNull(user);
+        Require.NotNull(envelope);
+        var peerId = ChatRepository.CanonicalPeerNetworkId(peerNetworkId);
+        if (peerId.Length == 0 || envelope.Length == 0)
+            return;
+
+        var targets = await CollectPeerServerTargetsAsync(peerId, cancellationToken).ConfigureAwait(false);
+        if (targets.Count == 0)
+        {
+            _logger.LogDebug("Session control skipped: no ready server for peer {PeerId}", peerId);
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var messageId = Guid.NewGuid().ToString("N");
+        var dto = new MessageDto
+        {
+            MessageId = messageId,
+            SrcNetworkId = user.NetworkIdShort.Trim(),
+            TgtNetworkId = peerId,
+            CreatedUtc = now,
+            UpdatedUtc = now,
+            EncryptedDataBase64 = Convert.ToBase64String(envelope)
+        };
+
+        foreach (var conn in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_manager.AllowsTraffic(conn))
+                continue;
+            try
+            {
+                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                sendCts.CancelAfter(SendMessageHttpTimeout);
+                await TrackAsync(conn, () => conn.Api.SendMessageAsync(dto, sendCts.Token))
+                    .ConfigureAwait(false);
+                _logger.LogDebug(
+                    "Session control posted messageId={MessageId} peer={PeerId} on {BaseUrl}",
+                    messageId, peerId, conn.Entity.BaseUrl);
+                return;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogDebug("Session control timed out on {BaseUrl}", conn.Entity.BaseUrl);
+                _manager.RecordRequestFailure(conn.Entity.Id);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "Session control failed on {BaseUrl}", conn.Entity.BaseUrl);
+            }
+        }
     }
 
     /// <summary>
@@ -1045,20 +1111,21 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             return false;
         }
 
+        var peerId = ChatRepository.CanonicalPeerNetworkId(chat.PeerNetworkIdShort);
+        if (peerId.Length == 0)
+            return false;
+
         byte[] ciphertext;
         try
         {
-            ciphertext = MessengerServerPayloadCodec.Encrypt(innerWire, peerKey);
+            ciphertext = MessengerServerPayloadCodec.EncryptPreferSession(
+                innerWire, peerKey, peerId, _serverSessions);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to encrypt blob for chat {ChatId}", chat.Id);
             return false;
         }
-
-        var peerId = chat.PeerNetworkIdShort.Trim();
-        if (peerId.Length == 0)
-            return false;
 
         var targets = await CollectPeerServerTargetsAsync(peerId, cancellationToken).ConfigureAwait(false);
         if (targets.Count == 0)
@@ -2460,10 +2527,18 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                 message.TgtNetworkId,
                 connection.Entity.BaseUrl);
 
-            byte[] wire;
+            if (string.IsNullOrWhiteSpace(message.EncryptedDataBase64))
+            {
+                _logger.LogDebug("Skipping server message {MessageId}: empty payload", message.MessageId);
+                continue;
+            }
+
+            var peerId = message.SrcNetworkId.Trim();
+            ServerPayloadOpenResult opened;
             try
             {
-                wire = MessengerServerPayloadCodec.DecryptFromBase64(message.EncryptedDataBase64, privateKey);
+                var blob = Convert.FromBase64String(message.EncryptedDataBase64.Trim());
+                opened = MessengerServerPayloadCodec.Open(blob, privateKey, peerId, _serverSessions);
             }
             catch (Exception ex)
             {
@@ -2471,8 +2546,23 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                 continue;
             }
 
-            var peerId = message.SrcNetworkId.Trim();
+            if (opened.ResponseEnvelope is { Length: > 0 } response)
+            {
+                try
+                {
+                    await TryDeliverRawEnvelopeAsync(peerId, user, response, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex,
+                        "Session control reply failed for message {MessageId}", message.MessageId);
+                }
+            }
 
+            var wire = opened.ChatWire;
+            if (wire != null)
+            {
             await _ingestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -2510,6 +2600,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             finally
             {
                 _ingestGate.Release();
+            }
             }
 
             // Ack on every server that delivered a copy, even if we already displayed it once.

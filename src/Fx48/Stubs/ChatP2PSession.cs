@@ -196,7 +196,25 @@ public sealed class ChatP2PSession
         try
         {
             var privateKey = RsaKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
-            wire = MessengerServerPayloadCodec.Decrypt(ciphertext, privateKey);
+            var opened = MessengerServerPayloadCodec.Open(
+                ciphertext, privateKey, _chat.PeerNetworkIdShort, ServerCipherSessionStore.Shared);
+            if (opened.ChatWire == null)
+                return false;
+            if (opened.ResponseEnvelope is { Length: > 0 } response)
+            {
+                try
+                {
+                    await _servers.TryDeliverRawEnvelopeAsync(
+                            _chat.PeerNetworkIdShort, _user, response, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ackEx) when (ackEx is not OperationCanceledException)
+                {
+                    _logger?.LogDebug(ackEx, "Chat {ChatId}: session probe ack after blob download failed", _chat.Id);
+                }
+            }
+
+            wire = opened.ChatWire;
         }
         catch (Exception ex)
         {
