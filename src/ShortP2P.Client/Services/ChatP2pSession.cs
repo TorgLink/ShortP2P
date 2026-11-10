@@ -47,6 +47,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private static readonly TimeSpan InviteResyncCooldown = TimeSpan.FromSeconds(3);
     /// <summary>Successful encrypted TX ACK / inbound decrypt keeps AES across missed crypto probes.</summary>
     private static readonly TimeSpan EncryptedPathProofFreshness = TimeSpan.FromSeconds(120);
+    private readonly HashSet<int> _manualOutboundRetryIds = new();
     private readonly SemaphoreSlim _cryptoProbeLoopLock = new(1, 1);
     private readonly P2pCryptoSessionCache _cryptoSessionCache;
     private readonly SemaphoreSlim _flushPendingSem = new(1, 1);
@@ -1596,6 +1597,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         lock (_pendingSync)
         {
             _pendingOutgoing.Clear();
+            _manualOutboundRetryIds.Clear();
         }
     }
 
@@ -1803,6 +1805,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 var row = await _repo.GetMessageAsync(nextId, includePayloadBlob: false).ConfigureAwait(false);
                 if (row == null || row.ChatId != _chat.Id || !row.Outgoing)
                 {
+                    ForgetManualOutboundRetry(nextId);
+                    DequeuePendingOutgoingHead(nextId);
+                    continue;
+                }
+
+                if (ShouldSkipLoRaAutoRetry(row, nextId))
+                {
+                    await MarkOutboundWaitingForManualRetryAsync(nextId).ConfigureAwait(false);
                     DequeuePendingOutgoingHead(nextId);
                     continue;
                 }
@@ -1814,6 +1824,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         row = await _repo.GetMessageAsync(nextId, includePayloadBlob: true).ConfigureAwait(false);
                         if (row == null || row.ChatId != _chat.Id || !row.Outgoing)
                         {
+                            ForgetManualOutboundRetry(nextId);
                             DequeuePendingOutgoingHead(nextId);
                             continue;
                         }
@@ -1821,6 +1832,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
                     var wire = BuildOutgoingWire(row);
                     await DeliverOutgoingWireAsync(nextId, wire, cancellationToken).ConfigureAwait(false);
+                    ForgetManualOutboundRetry(nextId);
                 }
                 catch (OperationCanceledException)
                 {
@@ -1866,6 +1878,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                             "Chat {ChatId}: failed to mark message {MessageId} as failed", _chat.Id, nextId);
                     }
 
+                    ForgetManualOutboundRetry(nextId);
                     DequeuePendingOutgoingHead(nextId);
                     continue;
                 }
@@ -1885,6 +1898,60 @@ public sealed class ChatP2PSession : IAsyncDisposable
         {
             if (_pendingOutgoing.Count > 0 && _pendingOutgoing[0] == messageId)
                 _pendingOutgoing.RemoveAt(0);
+        }
+    }
+
+    /// <summary>
+    /// LoRa is the only usable outbound path: no UDP, no BLE peer endpoint, no messenger-server pin.
+    /// </summary>
+    private bool IsLoRaOnlyOutboundPath()
+    {
+        if (IsCommunicatingViaMessengerServer)
+            return false;
+        if (IsUdpOutboundReady())
+            return false;
+        if (IsTransportEnabled(TransportKind.Bluetooth) && TryGetPeerBluetoothMac(out _))
+            return false;
+        return HasHostTransportEndpoint() || IsMeshtasticPathActive;
+    }
+
+    private bool IsManualOutboundRetry(int messageId)
+    {
+        lock (_pendingSync)
+            return _manualOutboundRetryIds.Contains(messageId);
+    }
+
+    private void ForgetManualOutboundRetry(int messageId)
+    {
+        lock (_pendingSync)
+            _manualOutboundRetryIds.Remove(messageId);
+    }
+
+    private bool ShouldSkipLoRaAutoRetry(ChatMessageEntity row, int messageId)
+    {
+        if (!IsLoRaOnlyOutboundPath())
+            return false;
+        if (IsManualOutboundRetry(messageId))
+            return false;
+        return LoRaOutboundRetryPolicy.IsOlderThanAutoRetryWindow(row.SentUtcTicks, DateTime.UtcNow);
+    }
+
+    private async Task MarkOutboundWaitingForManualRetryAsync(int messageId)
+    {
+        ForgetManualOutboundRetry(messageId);
+        try
+        {
+            await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Failed)
+                .ConfigureAwait(false);
+            RaiseMessagesChanged();
+            _logger.LogInformation(
+                "Chat {ChatId}: LoRa-only — message {MessageId} older than {MaxAgeSeconds}s; waiting for manual retry (!)",
+                _chat.Id, messageId, LoRaOutboundRetryPolicy.AutoRetryMaxAge.TotalSeconds);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex,
+                "Chat {ChatId}: could not mark message {MessageId} for manual LoRa retry", _chat.Id, messageId);
         }
     }
 
@@ -2280,6 +2347,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
         var row = await _repo.GetMessageAsync(messageId).ConfigureAwait(false);
         if (row == null || row.ChatId != _chat.Id || !row.Outgoing)
             return;
+
+        lock (_pendingSync)
+            _manualOutboundRetryIds.Add(messageId);
 
         await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Pending).ConfigureAwait(false);
         RaiseMessagesChanged();
@@ -4229,6 +4299,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        var loRaOnly = IsLoRaOnlyOutboundPath();
+        var nowUtc = DateTime.UtcNow;
         var latestIds = new List<int>(UdpFallbackLatestUnsentCount);
         foreach (var row in page)
         {
@@ -4237,6 +4309,16 @@ public sealed class ChatP2PSession : IAsyncDisposable
             var status = (MessageDeliveryStatus)row.DeliveryStatus;
             if (status is not (MessageDeliveryStatus.Pending or MessageDeliveryStatus.Failed))
                 continue;
+
+            if (loRaOnly &&
+                LoRaOutboundRetryPolicy.IsOlderThanAutoRetryWindow(row.SentUtcTicks, nowUtc) &&
+                !IsManualOutboundRetry(row.Id))
+            {
+                if (status == MessageDeliveryStatus.Pending)
+                    await MarkOutboundWaitingForManualRetryAsync(row.Id).ConfigureAwait(false);
+                continue;
+            }
+
             latestIds.Add(row.Id);
             if (latestIds.Count >= UdpFallbackLatestUnsentCount)
                 break;
