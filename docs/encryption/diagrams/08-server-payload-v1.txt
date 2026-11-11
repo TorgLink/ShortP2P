@@ -1,0 +1,2 @@
+VECTOR TEXT: 08-server-payload-v1.svg
+[plain] -> [AES-256-GCM] -> [RSA-OAEP-SHA256 wrap key||nonce] -> [v1 blob] -> Base64 -> TLS -> peer reverse

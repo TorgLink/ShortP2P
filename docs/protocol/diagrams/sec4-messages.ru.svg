@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="468" viewBox="0 0 760 468" role="img">
+  <title>sec4-messages</title>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F3A5F"/>
+    </marker>
+  </defs>
+  <rect x="20" y="12" width="720" height="70" rx="8" ry="8" fill="#E7EEF7" stroke="#B9CCE1" stroke-width="1"/>
+  <text x="36" y="34" text-anchor="start" font-family="DejaVu Sans" font-size="11" font-weight="700" fill="#2B4C7E">ОПРЕДЕЛЕНИЕ</text>
+  <text x="36" y="54" text-anchor="start" font-family="DejaVu Sans" font-size="10.5" font-weight="normal" fill="#243B5A">Внутри шифрования передаётся кадр ChatWire: магия S2P1 (4 байта),</text>
+  <text x="36" y="70" text-anchor="start" font-family="DejaVu Sans" font-size="10.5" font-weight="normal" fill="#243B5A">затем байт типа, затем поля.</text>
+  <rect x="20" y="96" width="220" height="104" rx="8" ry="8" fill="#EBF1F9" stroke="#9AA7B8" stroke-width="1"/>
+  <rect x="20" y="96" width="220" height="24" rx="8" ry="8" fill="#3E6DB5" stroke="#3E6DB5" stroke-width="1"/>
+  <text x="130.0" y="112" text-anchor="middle" font-family="DejaVu Sans" font-size="10.5" font-weight="700" fill="#FFFFFF">МАГИЯ S2P1</text>
+  <text x="130.0" y="138" text-anchor="middle" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#2A3546">ASCII-заголовок кадра</text>
+  <text x="130.0" y="152" text-anchor="middle" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#2A3546">разборщик узнаёт формат</text>
+  <rect x="270" y="96" width="220" height="104" rx="8" ry="8" fill="#F1EDF9" stroke="#9AA7B8" stroke-width="1"/>
+  <rect x="270" y="96" width="220" height="24" rx="8" ry="8" fill="#7A5FB5" stroke="#7A5FB5" stroke-width="1"/>
+  <text x="380.0" y="112" text-anchor="middle" font-family="DejaVu Sans" font-size="10.5" font-weight="700" fill="#FFFFFF">БАЙТ ТИПА 0x01..0x0A</text>
+  <text x="380.0" y="138" text-anchor="middle" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#2A3546">текст / картинка / файл</text>
+  <text x="380.0" y="152" text-anchor="middle" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#2A3546">словари / проба / профиль</text>
+  <rect x="520" y="96" width="220" height="104" rx="8" ry="8" fill="#EAF5F0" stroke="#9AA7B8" stroke-width="1"/>
+  <rect x="520" y="96" width="220" height="24" rx="8" ry="8" fill="#3F9A6E" stroke="#3F9A6E" stroke-width="1"/>
+  <text x="630.0" y="112" text-anchor="middle" font-family="DejaVu Sans" font-size="10.5" font-weight="700" fill="#FFFFFF">ПОЛЯ</text>
+  <text x="630.0" y="138" text-anchor="middle" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#2A3546">длины little-endian</text>
+  <text x="630.0" y="152" text-anchor="middle" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#2A3546">байты данных в конце</text>
+  <line x1="242" y1="160" x2="268" y2="160" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="492" y1="160" x2="518" y2="160" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="20" y="218" width="430" height="230" rx="8" ry="8" fill="#F2F5F9" stroke="#C4CFDD" stroke-width="1"/>
+  <text x="36" y="242" text-anchor="start" font-family="DejaVu Sans" font-size="10.5" font-weight="700" fill="#2B4C7E">ПРИМЕР</text>
+  <text x="36" y="262" text-anchor="start" font-family="DejaVu Sans Mono" font-size="9.5" font-weight="normal" fill="#2A3546">53 32 50 31 01 05 00 00 00 48 65 6C 6C 6F</text>
+  <text x="36" y="277" text-anchor="start" font-family="DejaVu Sans Mono" font-size="9.5" font-weight="normal" fill="#2A3546"> S2P1      kind len LE      H  e  l  l  o</text>
+  <text x="36" y="292" text-anchor="start" font-family="DejaVu Sans Mono" font-size="9.5" font-weight="normal" fill="#2A3546">0x04/0x05: JSON | 0x06: about+avatar</text>
+  <text x="36" y="307" text-anchor="start" font-family="DejaVu Sans Mono" font-size="9.5" font-weight="normal" fill="#2A3546">0x09: dict payload | 0x0A: ver|kind|chal(8)</text>
+  <rect x="470" y="218" width="270" height="230" rx="8" ry="8" fill="#FBECEA" stroke="#E7BCB6" stroke-width="1"/>
+  <text x="486" y="242" text-anchor="start" font-family="DejaVu Sans" font-size="11" font-weight="700" fill="#B3261E">ВАЖНО</text>
+  <text x="486" y="262" text-anchor="start" font-family="DejaVu Sans" font-size="10" font-weight="700" fill="#2E7D32">✓</text>
+  <text x="500" y="262" text-anchor="start" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#3A2A28">сырой UTF-8 без магии принимается как</text>
+  <text x="500" y="276" text-anchor="start" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#3A2A28">текст</text>
+  <text x="486" y="295" text-anchor="start" font-family="DejaVu Sans" font-size="10" font-weight="700" fill="#C62828">✗</text>
+  <text x="500" y="295" text-anchor="start" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#3A2A28">ACK 0xAC / NACK 0xAD — не кадры ChatWire</text>
+  <text x="486" y="314" text-anchor="start" font-family="DejaVu Sans" font-size="10" font-weight="700" fill="#2E7D32">✓</text>
+  <text x="500" y="314" text-anchor="start" font-family="DejaVu Sans" font-size="9.5" font-weight="normal" fill="#3A2A28">по странице на тип в docs/messages</text>
+</svg>

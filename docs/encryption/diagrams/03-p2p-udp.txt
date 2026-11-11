@@ -1,0 +1,4 @@
+VECTOR TEXT: 03-p2p-udp.svg
+[App] -> [Sch.1+2 frames] -> [UDP 17500] -> [Peer]
+optional path: [RELAY 0x22] carries opaque inner 0x02
+plaintext: invite/presence/discovery

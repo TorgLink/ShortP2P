@@ -602,7 +602,7 @@ public sealed class ChatForm : Form
             if (_p2PSession.IsMeshtasticPathActive)
             {
                 MessageBox.Show(this,
-                    "Передача видео по пути Meshtastic пока запрещена.",
+                    "Передача бинарных данных (голос, изображения, документы) по пути Meshtastic запрещена.",
                     "Видео", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -669,7 +669,7 @@ public sealed class ChatForm : Form
         if (_p2PSession.IsMeshtasticPathActive)
         {
             MessageBox.Show(this,
-                "Передача видео по пути Meshtastic пока запрещена.",
+                "Передача бинарных данных (голос, изображения, документы) по пути Meshtastic запрещена.",
                 "Видео", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -712,6 +712,13 @@ public sealed class ChatForm : Form
         if (_p2PSession == null)
             return;
         ClearDeliveryIssue();
+        if (_p2PSession.IsMeshtasticPathActive)
+        {
+            MessageBox.Show(this,
+                "Передача бинарных данных (голос, изображения, документы) по пути Meshtastic запрещена.",
+                "Файл", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
 
         using var dlg = new OpenFileDialog
         {
@@ -800,6 +807,13 @@ public sealed class ChatForm : Form
         if (_p2PSession == null)
             return;
         ClearDeliveryIssue();
+        if (_p2PSession.IsMeshtasticPathActive)
+        {
+            MessageBox.Show(this,
+                "Передача бинарных данных (голос, изображения, документы) по пути Meshtastic запрещена.",
+                "Файл", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
 
         using var dlg = new OpenFileDialog
         {
@@ -902,6 +916,15 @@ public sealed class ChatForm : Form
         if (text.Length == 0 || _p2PSession == null)
             return;
         ClearDeliveryIssue();
+        if (_p2PSession.IsMeshtasticPathActive && text.Length > ChatP2PSession.MaxMeshtasticMessageChars)
+        {
+            var warn =
+                $"По пути Meshtastic текст не длиннее {ChatP2PSession.MaxMeshtasticMessageChars} символов. Сократите сообщение, чтобы отправить.";
+            MessageBox.Show(this, warn, "Отправка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ShowDeliveryIssue(warn);
+            return;
+        }
+
         try
         {
             await _p2PSession.SendTextAsync(text).ConfigureAwait(true);
@@ -1007,6 +1030,14 @@ public sealed class ChatForm : Form
                 CleanupVoiceRecordingHardware();
             }
 
+            return;
+        }
+
+        if (_p2PSession.IsMeshtasticPathActive)
+        {
+            MessageBox.Show(this,
+                "Передача бинарных данных (голос, изображения, документы) по пути Meshtastic запрещена.",
+                "Голосовое", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 

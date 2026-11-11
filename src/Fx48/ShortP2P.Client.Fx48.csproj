@@ -39,6 +39,8 @@
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireVocabOffer.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireVocabAccept.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireCompressedText.cs" />
+    <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireSessionProbe.cs" />
+
     <Compile Include="..\ShortP2P.Client\ChatMedia\BotBlobChunker.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\BotChunkRetry.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatMediaOptions.cs" />

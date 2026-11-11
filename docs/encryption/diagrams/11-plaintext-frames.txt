@@ -1,0 +1,3 @@
+VECTOR TEXT: 11-plaintext-frames.svg
+clear on wire: invite, presence, gossip/profile, FIND/FOUND, BLE ads, forward API profiles
+secret ChatWire only via Schemes 2 / 7 / 8 / 9

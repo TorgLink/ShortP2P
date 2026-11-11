@@ -41,12 +41,16 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     public const int MaxMessageChars = 32768;
 
+    /// <summary>SHO-29 / TRL-33: Meshtastic airtime cap for outbound plain text.</summary>
+    public const int MaxMeshtasticMessageChars = 250;
+
     /// <summary>SHO-10: how many newest unsent outgoing rows to retry after UDP falls back.</summary>
     public const int UdpFallbackLatestUnsentCount = 20;
     private static readonly TimeSpan DecryptRecoveryCooldown = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan InviteResyncCooldown = TimeSpan.FromSeconds(3);
     /// <summary>Successful encrypted TX ACK / inbound decrypt keeps AES across missed crypto probes.</summary>
     private static readonly TimeSpan EncryptedPathProofFreshness = TimeSpan.FromSeconds(120);
+    private readonly HashSet<int> _manualOutboundRetryIds = new();
     private readonly SemaphoreSlim _cryptoProbeLoopLock = new(1, 1);
     private readonly P2pCryptoSessionCache _cryptoSessionCache;
     private readonly SemaphoreSlim _flushPendingSem = new(1, 1);
@@ -1125,6 +1129,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
             NoteEncryptedPathProof(cancellationToken);
             switch (wire)
             {
+                case ChatWireSessionProbe probe:
+                    if (!TryHandleSessionCryptoProbeBinary(probe, cancellationToken))
+                        _logger.LogWarning(
+                            "Chat {ChatId}: ignored malformed/unmatched binary session probe (not shown in UI)",
+                            _chat.Id);
+                    break;
                 case ChatWireText t:
                     if (SessionCryptoProbe.LooksLikeTestMessage(t.Text))
                     {
@@ -1241,9 +1251,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
     }
 
     /// <summary>
-    ///     Peer (re)invite / ChatRequest arrived: reload route/key from DB and drop AES state.
-    ///     Only the crypto leader re-initiates handshake and the test_send verification loop;
-    ///     the follower accepts the reset and waits for leader handshake / test_send.
+    ///     Peer (re)invite / ChatRequest arrived: reload route/key from DB.
+    ///     An existing AES session is kept. The leader probes only while the session is not yet
+    ///     confirmed; keys are replaced only when that probe fails. A changed peer public key
+    ///     still clears the session in <see cref="ApplyChatRow"/>.
     /// </summary>
     public async Task HandlePeerInviteResyncAsync(CancellationToken cancellationToken = default)
     {
@@ -1265,16 +1276,27 @@ public sealed class ChatP2PSession : IAsyncDisposable
             var token = linked?.Token ?? cancellationToken;
 
             var isLeader = IsCryptoSessionLeader();
-            _logger.LogInformation(
-                "Chat {ChatId}: peer invite — resetting crypto (role={Role}, drive={Drive})",
-                _chat.Id, SessionRoleLabel(), isLeader);
             SetHandshakeStatus(ChatHandshakeStatus.InProgress);
 
             var fresh = await _repo.GetChatAsync(_chat.Id).ConfigureAwait(false);
             if (fresh != null)
                 ApplyChatRow(fresh);
 
-            await ResetCryptoStateAsync(token).ConfigureAwait(false);
+            if (TryGetCryptoSession(out _))
+            {
+                _logger.LogInformation(
+                    "Chat {ChatId}: peer invite keeps crypto session until probe fails (role={Role}, drive={Drive})",
+                    _chat.Id, SessionRoleLabel(), isLeader);
+                if (isLeader && !_cryptoProbeRoundTripOk)
+                    _ = TryConfirmCryptoSessionAsync(token);
+                else
+                    RefreshHandshakeStatus();
+                return;
+            }
+
+            _logger.LogInformation(
+                "Chat {ChatId}: peer invite with no crypto session, establishing (role={Role}, drive={Drive})",
+                _chat.Id, SessionRoleLabel(), isLeader);
 
             if (isLeader)
             {
@@ -1283,7 +1305,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             }
             else
             {
-                // Follower: accept new session; nudge leader once; do not start probe retries.
+                // Follower: ask the leader for a handshake once. Do not start probe retries.
                 try
                 {
                     await SendSessionSetupRequestPacketAsync(token).ConfigureAwait(false);
@@ -1311,7 +1333,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
     }
 
     /// <summary>
-    ///     Сохраняет новый IP/порт пира (прямой UDP), убирает цепочку ретрансляции и сбрасывает шифросессию.
+    ///     Сохраняет новый IP/порт пира (прямой UDP) и убирает цепочку ретрансляции.
+    ///     Уже установленная шифросессия сохраняется; новые ключи появляются только если проба не проходит.
     /// </summary>
     public async Task ApplyPeerEndpointAsync(string peerHost, int peerPort,
         CancellationToken cancellationToken = default)
@@ -1328,7 +1351,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _chat.PeerPort = peerPort;
         _chat.RelayRouteBlob = null;
         RebuildRouteFromChat();
-        await ResetCryptoStateAsync(cancellationToken).ConfigureAwait(false);
         if (IsCryptoSessionLeader())
         {
             try
@@ -1584,6 +1606,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         lock (_pendingSync)
         {
             _pendingOutgoing.Clear();
+            _manualOutboundRetryIds.Clear();
         }
     }
 
@@ -1791,6 +1814,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 var row = await _repo.GetMessageAsync(nextId, includePayloadBlob: false).ConfigureAwait(false);
                 if (row == null || row.ChatId != _chat.Id || !row.Outgoing)
                 {
+                    ForgetManualOutboundRetry(nextId);
+                    DequeuePendingOutgoingHead(nextId);
+                    continue;
+                }
+
+                if (ShouldSkipLoRaAutoRetry(row, nextId))
+                {
+                    await MarkOutboundWaitingForManualRetryAsync(nextId).ConfigureAwait(false);
                     DequeuePendingOutgoingHead(nextId);
                     continue;
                 }
@@ -1802,6 +1833,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         row = await _repo.GetMessageAsync(nextId, includePayloadBlob: true).ConfigureAwait(false);
                         if (row == null || row.ChatId != _chat.Id || !row.Outgoing)
                         {
+                            ForgetManualOutboundRetry(nextId);
                             DequeuePendingOutgoingHead(nextId);
                             continue;
                         }
@@ -1809,6 +1841,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
                     var wire = BuildOutgoingWire(row);
                     await DeliverOutgoingWireAsync(nextId, wire, cancellationToken).ConfigureAwait(false);
+                    ForgetManualOutboundRetry(nextId);
                 }
                 catch (OperationCanceledException)
                 {
@@ -1854,6 +1887,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                             "Chat {ChatId}: failed to mark message {MessageId} as failed", _chat.Id, nextId);
                     }
 
+                    ForgetManualOutboundRetry(nextId);
                     DequeuePendingOutgoingHead(nextId);
                     continue;
                 }
@@ -1873,6 +1907,60 @@ public sealed class ChatP2PSession : IAsyncDisposable
         {
             if (_pendingOutgoing.Count > 0 && _pendingOutgoing[0] == messageId)
                 _pendingOutgoing.RemoveAt(0);
+        }
+    }
+
+    /// <summary>
+    /// LoRa is the only usable outbound path: no UDP, no BLE peer endpoint, no messenger-server pin.
+    /// </summary>
+    private bool IsLoRaOnlyOutboundPath()
+    {
+        if (IsCommunicatingViaMessengerServer)
+            return false;
+        if (IsUdpOutboundReady())
+            return false;
+        if (IsTransportEnabled(TransportKind.Bluetooth) && TryGetPeerBluetoothMac(out _))
+            return false;
+        return HasHostTransportEndpoint() || IsMeshtasticPathActive;
+    }
+
+    private bool IsManualOutboundRetry(int messageId)
+    {
+        lock (_pendingSync)
+            return _manualOutboundRetryIds.Contains(messageId);
+    }
+
+    private void ForgetManualOutboundRetry(int messageId)
+    {
+        lock (_pendingSync)
+            _manualOutboundRetryIds.Remove(messageId);
+    }
+
+    private bool ShouldSkipLoRaAutoRetry(ChatMessageEntity row, int messageId)
+    {
+        if (!IsLoRaOnlyOutboundPath())
+            return false;
+        if (IsManualOutboundRetry(messageId))
+            return false;
+        return LoRaOutboundRetryPolicy.IsOlderThanAutoRetryWindow(row.SentUtcTicks, DateTime.UtcNow);
+    }
+
+    private async Task MarkOutboundWaitingForManualRetryAsync(int messageId)
+    {
+        ForgetManualOutboundRetry(messageId);
+        try
+        {
+            await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Failed)
+                .ConfigureAwait(false);
+            RaiseMessagesChanged();
+            _logger.LogInformation(
+                "Chat {ChatId}: LoRa-only — message {MessageId} older than {MaxAgeSeconds}s; waiting for manual retry (!)",
+                _chat.Id, messageId, LoRaOutboundRetryPolicy.AutoRetryMaxAge.TotalSeconds);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex,
+                "Chat {ChatId}: could not mark message {MessageId} for manual LoRa retry", _chat.Id, messageId);
         }
     }
 
@@ -2269,6 +2357,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (row == null || row.ChatId != _chat.Id || !row.Outgoing)
             return;
 
+        lock (_pendingSync)
+            _manualOutboundRetryIds.Add(messageId);
+
         await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Pending).ConfigureAwait(false);
         RaiseMessagesChanged();
         var wire = BuildOutgoingWire(row);
@@ -2282,6 +2373,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (text.Length > MaxMessageChars)
             throw new ArgumentException($"Message is too long. Max length is {MaxMessageChars} characters.",
                 nameof(text));
+        EnsureMeshtasticAllowsText(text);
 
         var messageId = await _repo.AddMessageAsync(_chat.Id, true, text, MessageDeliveryStatus.Pending)
             .ConfigureAwait(false);
@@ -2316,6 +2408,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (imageBytes.Length == 0)
             throw new ArgumentException("Image is empty.", nameof(imageBytes));
 
+        EnsureMeshtasticAllowsBinary();
+
         var bytes = imageBytes.ToArray();
         if (_chat.IsBot)
         {
@@ -2335,6 +2429,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
     {
         if (fileBytes.Length == 0)
             throw new ArgumentException("File is empty.", nameof(fileBytes));
+
+        EnsureMeshtasticAllowsBinary();
 
         var bytes = fileBytes.ToArray();
         var safeName = Path.GetFileName(fileName.Trim());
@@ -2362,12 +2458,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _media.ValidateFileSize(mimeType, fileBytes.Length, CurrentTrafficQuality);
 
         var isVideo = mimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
-        if (isVideo && IsMeshtasticPathActive)
-        {
-            throw new InvalidOperationException(
-                "Передача видео по пути Meshtastic пока запрещена.");
-        }
-
         var payloadKindHuman = mimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
             ? "voice"
             : isVideo
@@ -2375,6 +2465,25 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 : "document";
         await CreateAndSendTransferOfferAsync(payloadKindHuman, safeName, mimeType, bytes, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>SHO-29 / TRL-33: Meshtastic cannot carry voice/image/document blobs.</summary>
+    private void EnsureMeshtasticAllowsBinary()
+    {
+        if (!IsMeshtasticPathActive)
+            return;
+        throw new InvalidOperationException(
+            "Binary transfers (voice, images, documents) are not allowed on the Meshtastic path.");
+    }
+
+    /// <summary>SHO-29 / TRL-33: Meshtastic outbound text is capped at <see cref="MaxMeshtasticMessageChars"/>.</summary>
+    private void EnsureMeshtasticAllowsText(string text)
+    {
+        if (!IsMeshtasticPathActive || text.Length <= MaxMeshtasticMessageChars)
+            return;
+        throw new ArgumentException(
+            $"Text over {MaxMeshtasticMessageChars} characters is not allowed on the Meshtastic path.",
+            nameof(text));
     }
 
     public async Task RequestBinaryDownloadAsync(int messageId, CancellationToken cancellationToken = default)
@@ -2484,7 +2593,28 @@ public sealed class ChatP2PSession : IAsyncDisposable
         byte[] wire;
         try
         {
-            wire = MessengerServerPayloadCodec.Decrypt(ciphertext, _auth.GetCurrentPrivateKey());
+            var opened = MessengerServerPayloadCodec.Open(
+                ciphertext,
+                _auth.GetCurrentPrivateKey(),
+                _chat.PeerNetworkIdShort,
+                ServerCipherSessionStore.Shared);
+            if (opened.ChatWire == null)
+                return false;
+            if (opened.ResponseEnvelope is { Length: > 0 } response)
+            {
+                try
+                {
+                    await servers.TryDeliverRawEnvelopeAsync(
+                            _chat.PeerNetworkIdShort, _user, response, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "Chat {ChatId}: session probe ack after blob download failed", _chat.Id);
+                }
+            }
+
+            wire = opened.ChatWire;
         }
         catch
         {
@@ -2894,10 +3024,36 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 }
             }
 
+            if (TryGetCryptoSession(out _) && _messenger != null)
+            {
+                if (!IsCryptoSessionLeader())
+                {
+                    // Keep AES. Ask the leader to resend the same handshake; the leader probes and
+                    // rotates keys only when that probe fails.
+                    try
+                    {
+                        await SendSessionSetupRequestPacketAsync(token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Chat {ChatId}: follower 0x04 after decrypt failure failed", _chat.Id);
+                    }
+
+                    return;
+                }
+
+                _logger.LogInformation(
+                    "Chat {ChatId}: decrypt failure — probing existing session before any re-key (role={Role})",
+                    _chat.Id, SessionRoleLabel());
+                _handshakeWeInitiated = true;
+                _cryptoProbeRoundTripOk = false;
+                _ = TryConfirmCryptoSessionAsync(token);
+                return;
+            }
+
             await ResetCryptoStateAsync(token).ConfigureAwait(false);
             if (!IsCryptoSessionLeader())
             {
-                // Follower only clears AES and nudges; leader drives invite + test_send retries.
                 try
                 {
                     await SendSessionSetupRequestPacketAsync(token).ConfigureAwait(false);
@@ -3238,15 +3394,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 var canProbe = ms != null && _handshakeWeInitiated && IsCryptoSessionLeader();
                 if (canProbe)
                 {
-                    var my = _user.NetworkIdShort.Trim();
-                    var peer = _chat.PeerNetworkIdShort.Trim();
-                    var testWire = ChatWireCodec.EncodeText(
-                        SessionCryptoProbe.FormatTestSend(my, peer, DateTimeOffset.UtcNow, out var sendHash));
+                    var testWire = SessionCryptoProbe.CreateSendWire(out var challenge);
+                    SessionCryptoProbe.EnsureEncryptedSizeWithinBudget(testWire);
+                    var sendKey = SessionCryptoProbe.ChallengeToKey(challenge);
 
                     TaskCompletionSource<bool> tcs;
                     lock (_sync)
                     {
-                        _outstandingTestSendHash = sendHash;
+                        _outstandingTestSendHash = sendKey;
                         _cryptoProbeOkAwaiter?.TrySetCanceled();
                         _cryptoProbeOkAwaiter = tcs =
                             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3255,14 +3410,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     try
                     {
                         _logger.LogInformation(
-                            "Chat {ChatId}: sending crypto probe test_send hash={Hash}",
-                            _chat.Id, sendHash);
+                            "Chat {ChatId}: sending compact crypto probe test_send challenge={Hash} wire={WireBytes}b enc≤{MaxEnc}b",
+                            _chat.Id, sendKey, testWire.Length, SessionCryptoProbe.MaxEncryptedBytes);
                         await SendEncryptedProbeWireAsync(testWire, cancellationToken).ConfigureAwait(false);
                         await tcs.Task.WaitAsync(okWait, cancellationToken).ConfigureAwait(false);
                         MarkCryptoSessionEstablished(cancellationToken);
                         _logger.LogInformation(
                             "Chat {ChatId}: crypto probe round-trip confirmed (test_response for {Hash})",
-                            _chat.Id, sendHash);
+                            _chat.Id, sendKey);
                         return;
                     }
                     catch (TimeoutException)
@@ -3286,7 +3441,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         {
                             if (ReferenceEquals(_cryptoProbeOkAwaiter, tcs))
                                 _cryptoProbeOkAwaiter = null;
-                            if (string.Equals(_outstandingTestSendHash, sendHash, StringComparison.OrdinalIgnoreCase))
+                            if (string.Equals(_outstandingTestSendHash, sendKey, StringComparison.OrdinalIgnoreCase))
                                 _outstandingTestSendHash = null;
                         }
                     }
@@ -3391,20 +3546,18 @@ public sealed class ChatP2PSession : IAsyncDisposable
         await m.SendBinaryAsync(wire, _peerAddress!, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task SendCryptoProbeTestResponseAsync(string testSendHash, CancellationToken cancellationToken)
+    private async Task SendCryptoProbeTestResponseAsync(ReadOnlyMemory<byte> challenge, CancellationToken cancellationToken)
     {
         try
         {
             var m = _messenger;
             if (m == null)
                 return;
-            var my = _user.NetworkIdShort.Trim();
-            var peer = _chat.PeerNetworkIdShort.Trim();
-            var wire = ChatWireCodec.EncodeText(
-                SessionCryptoProbe.FormatTestResponse(my, peer, testSendHash, DateTimeOffset.UtcNow, out _));
+            var wire = SessionCryptoProbe.CreateResponseWire(challenge.Span);
+            SessionCryptoProbe.EnsureEncryptedSizeWithinBudget(wire);
             _logger.LogInformation(
-                "Chat {ChatId}: sending crypto probe test_response_for_{Hash}",
-                _chat.Id, testSendHash);
+                "Chat {ChatId}: sending compact crypto probe test_response challenge={Hash} wire={WireBytes}b",
+                _chat.Id, SessionCryptoProbe.ChallengeToKey(challenge.Span), wire.Length);
             await SendEncryptedProbeWireAsync(wire, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -3413,8 +3566,66 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
     }
 
+    private bool TryHandleSessionCryptoProbeBinary(ChatWireSessionProbe probe, CancellationToken cancellationToken)
+    {
+        if (!SessionCryptoProbe.TryParseBinary(probe, out var kind, out var challenge))
+            return false;
+
+        bool weInitiated;
+        string? outstandingKey;
+        lock (_sync)
+        {
+            weInitiated = _handshakeWeInitiated;
+            outstandingKey = _outstandingTestSendHash;
+        }
+
+        var key = SessionCryptoProbe.ChallengeToKey(challenge);
+        if (kind == SessionCryptoProbeKind.TestSend)
+        {
+            if (weInitiated)
+                return true;
+            _logger.LogInformation(
+                "Chat {ChatId}: received compact crypto probe test_send challenge={Hash}, sending test_response",
+                _chat.Id, key);
+            _ = SendCryptoProbeTestResponseAsync(challenge, cancellationToken);
+            MarkCryptoSessionEstablished(cancellationToken);
+            return true;
+        }
+
+        if (kind == SessionCryptoProbeKind.TestResponse)
+        {
+            if (!weInitiated)
+                return true;
+            if (string.IsNullOrEmpty(outstandingKey) ||
+                !string.Equals(key, outstandingKey, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Chat {ChatId}: crypto probe test_response challenge mismatch (got={Got}, expected={Expected})",
+                    _chat.Id, key, outstandingKey ?? "(none)");
+                return true;
+            }
+
+            _logger.LogInformation(
+                "Chat {ChatId}: received matching compact crypto probe test_response challenge={Hash}",
+                _chat.Id, key);
+            TaskCompletionSource<bool>? w;
+            lock (_sync)
+            {
+                w = _cryptoProbeOkAwaiter;
+                _cryptoProbeOkAwaiter = null;
+                _outstandingTestSendHash = null;
+            }
+
+            w?.TrySetResult(true);
+            return true;
+        }
+
+        return false;
+    }
+
     private bool TryHandleSessionCryptoProbeText(string text, CancellationToken cancellationToken)
     {
+        // Legacy text probes from older peers (large on LoRa; we no longer send these).
         if (!SessionCryptoProbe.TryParse(text, out var message))
             return false;
         var my = _user.NetworkIdShort.Trim();
@@ -3435,12 +3646,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (message.Kind == SessionCryptoProbeKind.TestSend)
         {
             if (weInitiated)
-                return true; // leader ignores inbound test_send
+                return true;
             _logger.LogInformation(
-                "Chat {ChatId}: received crypto probe test_send hash={Hash}, sending test_response",
-                _chat.Id, message.ContentHash);
-            _ = SendCryptoProbeTestResponseAsync(message.ContentHash, cancellationToken);
-            // Decrypting a valid test_send proves the follower path; mark confirmed for UI.
+                "Chat {ChatId}: received legacy text crypto probe test_send; ignoring oversized reply path",
+                _chat.Id);
+            // Do not reply with another large text probe. Mark local path proven; leader should
+            // re-probe with the compact binary format once it upgrades / retries.
             MarkCryptoSessionEstablished(cancellationToken);
             return true;
         }
@@ -3454,14 +3665,11 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 !string.Equals(referenced, outstandingHash, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning(
-                    "Chat {ChatId}: crypto probe test_response hash mismatch (got={Got}, expected={Expected})",
+                    "Chat {ChatId}: legacy crypto probe test_response hash mismatch (got={Got}, expected={Expected})",
                     _chat.Id, referenced, outstandingHash ?? "(none)");
                 return true;
             }
 
-            _logger.LogInformation(
-                "Chat {ChatId}: received matching crypto probe test_response_for_{Hash}",
-                _chat.Id, referenced);
             TaskCompletionSource<bool>? w;
             lock (_sync)
             {
@@ -3593,9 +3801,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     return;
                 }
 
-                _logger.LogInformation(
-                    "Chat {ChatId}: leader sending RSA handshake (0x01), crypto role={Role}, BLE role={BleRole}, force={ForceSendHandshake}",
-                    _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a", forceSendHandshake);
                 var hs = P2PCrypto.CreateHandshakeInitiation(_peerPublicKey);
                 var packet = new byte[129];
                 packet[0] = FrameHandshake;
@@ -3614,26 +3819,45 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     }
                     else
                     {
-                        // New keys only when there is no usable session yet (or after an explicit reset).
-                        if (ready || TryGetCryptoSession(out _))
-                            ClearCryptoSession();
-
-                        _ = _cryptoSessionCache.GetSession(_chat.Id, () => hs.Session);
-                        _lastLeaderHandshakeFrame = packet;
-                        _logger.LogInformation("Chat {ChatId}: leader crypto session created in cache (role={Role})",
-                            _chat.Id,
-                            SessionRoleLabel());
-                        if (_messenger == null)
+                        // A live session is never replaced here. New keys are installed only when
+                        // the cache is empty (first handshake, or after the probe failed and reset).
+                        if (TryGetCryptoSession(out _))
                         {
-                            _messenger =
-                                new MessengerService(SendCipherAsync, WaitForCryptoSessionAsync, CreateMessengerOptions(),
+                            _logger.LogInformation(
+                                "Chat {ChatId}: leader keeps existing crypto session; handshake not rotated (role={Role})",
+                                _chat.Id, SessionRoleLabel());
+                            if (_messenger == null)
+                            {
+                                _messenger = new MessengerService(
+                                    SendCipherAsync, WaitForCryptoSessionAsync, CreateMessengerOptions(),
                                     OnDecryptFailureAsync);
-                            _messenger.GotData += OnMessengerGotData;
-                            msToStart = _messenger;
+                                _messenger.GotData += OnMessengerGotData;
+                                msToStart = _messenger;
+                            }
                         }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Chat {ChatId}: leader sending RSA handshake (0x01), crypto role={Role}, BLE role={BleRole}, force={ForceSendHandshake}",
+                                _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a", forceSendHandshake);
+                            _ = _cryptoSessionCache.GetSession(_chat.Id, () => hs.Session);
+                            _lastLeaderHandshakeFrame = packet;
+                            _logger.LogInformation(
+                                "Chat {ChatId}: leader crypto session created in cache (role={Role})",
+                                _chat.Id,
+                                SessionRoleLabel());
+                            if (_messenger == null)
+                            {
+                                _messenger =
+                                    new MessengerService(SendCipherAsync, WaitForCryptoSessionAsync, CreateMessengerOptions(),
+                                        OnDecryptFailureAsync);
+                                _messenger.GotData += OnMessengerGotData;
+                                msToStart = _messenger;
+                            }
 
-                        _handshakeWeInitiated = true;
-                        packetToSend = packet;
+                            _handshakeWeInitiated = true;
+                            packetToSend = packet;
+                        }
                     }
                 }
             }
@@ -4154,6 +4378,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        var loRaOnly = IsLoRaOnlyOutboundPath();
+        var nowUtc = DateTime.UtcNow;
         var latestIds = new List<int>(UdpFallbackLatestUnsentCount);
         foreach (var row in page)
         {
@@ -4162,6 +4388,16 @@ public sealed class ChatP2PSession : IAsyncDisposable
             var status = (MessageDeliveryStatus)row.DeliveryStatus;
             if (status is not (MessageDeliveryStatus.Pending or MessageDeliveryStatus.Failed))
                 continue;
+
+            if (loRaOnly &&
+                LoRaOutboundRetryPolicy.IsOlderThanAutoRetryWindow(row.SentUtcTicks, nowUtc) &&
+                !IsManualOutboundRetry(row.Id))
+            {
+                if (status == MessageDeliveryStatus.Pending)
+                    await MarkOutboundWaitingForManualRetryAsync(row.Id).ConfigureAwait(false);
+                continue;
+            }
+
             latestIds.Add(row.Id);
             if (latestIds.Count >= UdpFallbackLatestUnsentCount)
                 break;
@@ -4202,9 +4438,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     /// <summary>
     ///     Manual server ↔ mesh switch for this chat. The choice is stored on the chat row and blocks the
-    ///     automatic UDP fallback until the user switches again. Crypto state is cleared and an invite is
-    ///     resent so the peer re-establishes the session on the new path. A failed mesh connect is not
-    ///     rolled back.
+    ///     automatic UDP fallback until the user switches again. The AES session is kept across the
+    ///     switch; an invite is resent so the peer learns the new path. Keys change only when the
+    ///     crypto probe fails. A failed mesh connect is not rolled back.
     /// </summary>
     public async Task SwitchDeliveryPathAsync(ChatDeliveryPath path, CancellationToken cancellationToken = default)
     {
@@ -4225,10 +4461,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
         _udpFallbackApplied = 1;
         _udpOutboundUnavailable = true;
         await PersistDeliveryPathAsync().ConfigureAwait(false);
-        _logger.LogInformation("Chat {ChatId}: manual switch to messenger server; reset session and re-invite",
+        _logger.LogInformation(
+            "Chat {ChatId}: manual switch to messenger server; keeping crypto session until probe fails",
             _chat.Id);
 
-        await ResetCryptoStateAsync(cancellationToken).ConfigureAwait(false);
         // TryServerFallbackAsync pins a hosting server and republishes ChatRequest (server invite).
         var bound = await TryServerFallbackAsync(cancellationToken).ConfigureAwait(false);
         if (bound)
@@ -4278,10 +4514,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
         RaiseActiveChannelChanged();
         MergeAdditionalTransportPeerAddresses();
         PreferAdditionalTransportEndpoint();
-        _logger.LogInformation("Chat {ChatId}: manual switch to mesh (UDP/BLE/LoRa); reset session and re-invite",
+        _logger.LogInformation(
+            "Chat {ChatId}: manual switch to mesh (UDP/BLE/LoRa); keeping crypto session until probe fails",
             _chat.Id);
-
-        await ResetCryptoStateAsync(cancellationToken).ConfigureAwait(false);
 
         Exception? connectError = null;
         try

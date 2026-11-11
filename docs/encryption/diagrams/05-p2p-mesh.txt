@@ -1,0 +1,2 @@
+VECTOR TEXT: 05-p2p-mesh.svg
+[App] -> [Chunk+Sch.2] -> [mesh TX] -> [hops] -> [mesh RX] -> [Sch.2 decrypt] -> [App]
