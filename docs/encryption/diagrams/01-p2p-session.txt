@@ -1,0 +1,5 @@
+VECTOR TEXT: 01-p2p-session.svg
+[RNG 48B aes||mac] -> [RSA-OAEP-SHA1 peer pub] -> [wire 0x01||CT128]
+                                                      |
+peer: [0x01] -> [RSA-OAEP-SHA1 local priv] -> [P2PSession AES+HMAC]
+follower may send [0x04||NetworkId12] first (plaintext wrapper)

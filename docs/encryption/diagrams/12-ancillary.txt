@@ -1,0 +1,2 @@
+VECTOR TEXT: 12-ancillary.svg
+[SafetyNumber SHA-256] | [Profile backup PBKDF2 + ChaCha20-Poly1305] | [RSA-1024 identity]
