@@ -1,0 +1,4 @@
+VECTOR TEXT: 10-message-types.svg
+S2P1 kinds: 01 text, 02 image, 03 file, 04 offer, 05 control, 06 userinfo,
+07/08 vocab, 09 compressed text, 0A session probe; plus ACK 0xAC / NACK 0xAD
+All are plaintext inputs to Sch.2 (P2P) or Sch.7/8/9 (server/bot).

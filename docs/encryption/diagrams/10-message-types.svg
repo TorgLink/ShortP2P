@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="290" viewBox="0 0 780 290" role="img">
+  <title>Message types inside encrypted channels</title>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F3A5F"/>
+    </marker>
+  </defs>
+  <text x="40" y="30" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#12233A">ChatWire magic S2P1 — plaintext before Sch.2/7/8/9</text>
+  <rect x="40" y="50" width="100" height="45" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="90.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x01 Text</text>
+  <rect x="160" y="50" width="100" height="45" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="210.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x02 Image</text>
+  <rect x="280" y="50" width="100" height="45" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="330.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x03 File</text>
+  <rect x="400" y="50" width="100" height="45" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="450.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x04 Offer</text>
+  <rect x="520" y="50" width="100" height="45" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="570.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x05 Ctrl</text>
+  <rect x="640" y="50" width="100" height="45" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="690.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x06 Info</text>
+  <rect x="40" y="120" width="100" height="45" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="90.0" y="138" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x07 VocabOff</text>
+  <rect x="160" y="120" width="100" height="45" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="210.0" y="138" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x08 VocabAcc</text>
+  <rect x="280" y="120" width="100" height="45" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="330.0" y="138" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x09 CompText</text>
+  <rect x="400" y="120" width="100" height="45" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="450.0" y="138" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0x0A Probe</text>
+  <rect x="520" y="120" width="100" height="45" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="570.0" y="138" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0xAC ACK</text>
+  <rect x="640" y="120" width="100" height="45" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="690.0" y="138" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">0xAD NACK</text>
+  <rect x="200" y="200" width="340" height="55" rx="6" ry="6" fill="#E6F4EA" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="370.0" y="218" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Encrypt envelope</text>
+  <text x="370.0" y="236" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">P2P Sch.2 / Server v2 or v1 / Bot v1</text>
+</svg>

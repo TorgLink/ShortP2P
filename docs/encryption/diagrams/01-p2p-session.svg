@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" role="img">
+  <title>P2P session establishment (RSA to session keys)</title>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F3A5F"/>
+    </marker>
+  </defs>
+  <rect x="40" y="40" width="150" height="70" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="115.0" y="58" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">RNG</text>
+  <text x="115.0" y="76" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">48 random bytes</text>
+  <text x="115.0" y="90" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">aesKey16||macKey32</text>
+  <rect x="240" y="40" width="200" height="70" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="340.0" y="58" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">RSA-OAEP SHA-1</text>
+  <text x="340.0" y="76" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">peer RSA-1024 pub</text>
+  <text x="340.0" y="90" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">ciphertext 128 B</text>
+  <rect x="500" y="40" width="170" height="70" rx="6" ry="6" fill="#F7F1E8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="585.0" y="58" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Wire 0x01</text>
+  <text x="585.0" y="76" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">0x01 || CT(128)</text>
+  <text x="585.0" y="90" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">total 129 B</text>
+  <rect x="240" y="160" width="200" height="70" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="340.0" y="178" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">RSA decrypt</text>
+  <text x="340.0" y="196" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">local RSA priv</text>
+  <text x="340.0" y="210" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">sessionKeys 48 B</text>
+  <rect x="500" y="160" width="170" height="70" rx="6" ry="6" fill="#E6F4EA" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="585.0" y="178" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">P2PSession</text>
+  <text x="585.0" y="196" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">AES-128 key</text>
+  <text x="585.0" y="210" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">HMAC key 32 B</text>
+  <rect x="40" y="160" width="150" height="70" rx="6" ry="6" fill="#F7F1E8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="115.0" y="178" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Follower 0x04</text>
+  <text x="115.0" y="196" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">0x04||NetId(12)</text>
+  <text x="115.0" y="210" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">plaintext request</text>
+  <line x1="190" y1="75" x2="240" y2="75" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="215.0" y="69.0" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#334E68">sessionKeys</text>
+  <line x1="440" y1="75" x2="500" y2="75" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="470.0" y="69.0" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#334E68">encrypt</text>
+  <line x1="585" y1="110" x2="585" y2="160" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="585.0" y="129.0" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#334E68">to peer</text>
+  <line x1="440" y1="195" x2="500" y2="195" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="470.0" y="189.0" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#334E68">split keys</text>
+  <line x1="190" y1="195" x2="240" y2="195" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="215.0" y="189.0" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#334E68">optional</text>
+  <text x="40" y="270" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#486581">Leader = smaller NetworkId (12 B). Follower waits for 0x01 after 0x04.</text>
+</svg>

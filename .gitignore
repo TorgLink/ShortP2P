@@ -46,3 +46,6 @@ messenger*.litedb
 /scripts/server/docker/.env.Development
 /scripts/server/docker/.env.persistent.Release
 /scripts/server/docker/.env.persistent.Development
+
+# LibreOffice lock files
+.~lock.*#

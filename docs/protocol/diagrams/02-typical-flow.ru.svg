@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="260" viewBox="0 0 760 260" role="img">
+  <title>Типичный обмен в прямом чате</title>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F3A5F"/>
+    </marker>
+  </defs>
+  <rect x="20" y="40" width="130" height="70" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="85.0" y="58" text-anchor="middle" font-family="DejaVu Sans" font-size="12" font-weight="700" fill="#12233A">1. Контакт</text>
+  <text x="85.0" y="76" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">invite 0x30</text>
+  <text x="85.0" y="90" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">или QR</text>
+  <rect x="170" y="40" width="140" height="70" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="240.0" y="58" text-anchor="middle" font-family="DejaVu Sans" font-size="12" font-weight="700" fill="#12233A">2. Сессия</text>
+  <text x="240.0" y="76" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">0x04 / 0x01</text>
+  <text x="240.0" y="90" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">ключи RSA</text>
+  <rect x="330" y="40" width="150" height="70" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="405.0" y="58" text-anchor="middle" font-family="DejaVu Sans" font-size="12" font-weight="700" fill="#12233A">3. Шифр</text>
+  <text x="405.0" y="76" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">0x02 + AES</text>
+  <text x="405.0" y="90" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">ChatWire</text>
+  <rect x="500" y="40" width="140" height="70" rx="6" ry="6" fill="#F7F1E8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="570.0" y="58" text-anchor="middle" font-family="DejaVu Sans" font-size="12" font-weight="700" fill="#12233A">4. Опционально</text>
+  <text x="570.0" y="76" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">сервер / бот</text>
+  <text x="570.0" y="90" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10" fill="#243447">mesh-ретрансляция</text>
+  <line x1="150" y1="75" x2="170" y2="75" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="310" y1="75" x2="330" y2="75" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="480" y1="75" x2="500" y2="75" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="170" y="160" width="300" height="55" rx="6" ry="6" fill="#E6F4EA" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="320.0" y="178" text-anchor="middle" font-family="DejaVu Sans" font-size="12" font-weight="700" fill="#12233A">Одни и те же шифры приложения в UDP, BLE, mesh</text>
+</svg>

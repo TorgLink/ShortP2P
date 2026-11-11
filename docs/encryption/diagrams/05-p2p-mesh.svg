@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="300" viewBox="0 0 740 300" role="img">
+  <title>P2P over mesh / LoRa</title>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F3A5F"/>
+    </marker>
+  </defs>
+  <rect x="30" y="50" width="140" height="70" rx="6" ry="6" fill="#E8F1F8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="100.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">App</text>
+  <text x="100.0" y="86" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">often small</text>
+  <text x="100.0" y="100" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">ChatWire</text>
+  <rect x="200" y="50" width="150" height="70" rx="6" ry="6" fill="#D9E8F5" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="275.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Chunk+Sch.2</text>
+  <text x="275.0" y="86" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">more chunks</text>
+  <text x="275.0" y="100" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">if small MTU</text>
+  <rect x="380" y="50" width="140" height="70" rx="6" ry="6" fill="#F7F1E8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="450.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Host mesh TX</text>
+  <text x="450.0" y="86" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">LoRa/Meshtastic</text>
+  <text x="450.0" y="100" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">framing</text>
+  <rect x="550" y="50" width="140" height="70" rx="6" ry="6" fill="#F7F1E8" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="620.0" y="68" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Hops</text>
+  <text x="620.0" y="86" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">opaque cipher</text>
+  <rect x="380" y="170" width="140" height="60" rx="6" ry="6" fill="#E6F4EA" stroke="#1F3A5F" stroke-width="1.5"/>
+  <text x="450.0" y="188" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="12" font-weight="700" fill="#12233A">Host mesh RX</text>
+  <text x="450.0" y="206" text-anchor="middle" font-family="Consolas, Courier New, monospace" font-size="10" fill="#243447">to Sch.2 dec</text>
+  <line x1="170" y1="85" x2="200" y2="85" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="350" y1="85" x2="380" y2="85" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="520" y1="85" x2="550" y2="85" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="620" y1="120" x2="450" y2="170" stroke="#1F3A5F" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="30" y="260" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#486581">Application crypto = Schemes 1-2; mesh host adds transport framing.</text>
+</svg>
