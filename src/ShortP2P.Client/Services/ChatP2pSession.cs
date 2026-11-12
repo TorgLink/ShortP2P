@@ -44,6 +44,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// <summary>SHO-29 / TRL-33: Meshtastic airtime cap for outbound plain text.</summary>
     public const int MaxMeshtasticMessageChars = 250;
 
+    /// <summary>SHO-31 / TRL-34: every Meshtastic/LoRa binary skip log must start with this prefix.</summary>
+    public const string MeshtasticBinarySkipLogPrefix = "Skipped in lora/meshtastic!";
+
     /// <summary>SHO-10: how many newest unsent outgoing rows to retry after UDP falls back.</summary>
     public const int UdpFallbackLatestUnsentCount = 20;
     private static readonly TimeSpan DecryptRecoveryCooldown = TimeSpan.FromSeconds(10);
@@ -1826,6 +1829,29 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     continue;
                 }
 
+                // SHO-31: never push stored binary / transfer wires over an active Meshtastic path
+                // (covers retries after the user switched delivery to mesh).
+                if (IsForbiddenBinaryPayloadKind(row.PayloadKind) && IsMeshtasticPathActive)
+                {
+                    LogMeshtasticBinarySkip($"{DescribePayloadKind(row.PayloadKind)} message {nextId}");
+                    try
+                    {
+                        await _repo.UpdateMessageDeliveryStatusAsync(nextId, MessageDeliveryStatus.Failed)
+                            .ConfigureAwait(false);
+                        RaiseMessagesChanged();
+                    }
+                    catch (Exception updateEx) when (updateEx is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(updateEx,
+                            "Chat {ChatId}: failed to mark skipped Meshtastic binary {MessageId} as failed",
+                            _chat.Id, nextId);
+                    }
+
+                    ForgetManualOutboundRetry(nextId);
+                    DequeuePendingOutgoingHead(nextId);
+                    continue;
+                }
+
                 try
                 {
                     if (OutgoingWireNeedsPayloadBlob(row))
@@ -2142,9 +2168,15 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         var dests = BuildOrderedDirectPeerAddresses();
         if (dests.Count > 0)
-            await _messenger.SendBinaryAsyncExpectAck(wire, dests, cancellationToken).ConfigureAwait(false);
-        else if (_peerAddress != null)
+        {
+            if (!TryPrepareOutboundDestinations(wire, dests, out var allowed) || allowed.Count == 0)
+                return;
+            await _messenger.SendBinaryAsyncExpectAck(wire, allowed, cancellationToken).ConfigureAwait(false);
+        }
+        else if (_peerAddress != null && !ShouldSkipMeshtasticDestination(_peerAddress, wire))
+        {
             await _messenger.SendBinaryAsync(wire, _peerAddress, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task DeliverOutgoingWireAsync(int messageId, byte[] wire, CancellationToken cancellationToken)
@@ -2184,15 +2216,18 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     if (dests.Count == 0)
                         throw new InvalidOperationException(
                             "No ready peer endpoints for P2P delivery (UDP/BLE/LoRa).");
+                    if (!TryPrepareOutboundDestinations(wire, dests, out var allowed) || allowed.Count == 0)
+                        throw new InvalidOperationException(
+                            "Binary / UserInfo payloads are not allowed on the Meshtastic path.");
                     _logger.LogInformation(
                         "Chat {ChatId}: P2P send message {MessageId} wireLen={WireLen} via {DestCount} endpoint(s): {Endpoints}",
-                        _chat.Id, messageId, wire.Length, dests.Count,
-                        string.Join(", ", dests.Select(FormatTransportAddress)));
+                        _chat.Id, messageId, wire.Length, allowed.Count,
+                        string.Join(", ", allowed.Select(FormatTransportAddress)));
                     // One check while waiting for the peer delivery ACK.
                     await _repo.UpdateMessageDeliveryStatusAsync(messageId, MessageDeliveryStatus.Sent)
                         .ConfigureAwait(false);
                     RaiseMessagesChanged();
-                    await _messenger.SendBinaryAsyncExpectAck(wire, dests, ct).ConfigureAwait(false);
+                    await _messenger.SendBinaryAsyncExpectAck(wire, allowed, ct).ConfigureAwait(false);
                     NoteEncryptedPathProof(ct);
                     _logger.LogInformation(
                         "Chat {ChatId}: delivery ACK received for message {MessageId}",
@@ -2200,6 +2235,9 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 }
                 else
                 {
+                    if (ShouldSkipMeshtasticDestination(_peerAddress!, wire))
+                        throw new InvalidOperationException(
+                            "Binary / UserInfo payloads are not allowed on the Meshtastic path.");
                     _logger.LogInformation(
                         "Chat {ChatId}: P2P relay send message {MessageId} via {Endpoint}",
                         _chat.Id, messageId, FormatTransportAddress(_peerAddress!));
@@ -2250,10 +2288,14 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 if (string.IsNullOrEmpty(_chat.RelayRouteBlob))
                 {
                     var dests = BuildOrderedDirectPeerAddresses();
-                    await _messenger.SendBinaryAsyncExpectAck(wire, dests, ct).ConfigureAwait(false);
+                    if (!TryPrepareOutboundDestinations(wire, dests, out var allowed) || allowed.Count == 0)
+                        return;
+                    await _messenger.SendBinaryAsyncExpectAck(wire, allowed, ct).ConfigureAwait(false);
                 }
                 else
                 {
+                    if (ShouldSkipMeshtasticDestination(_peerAddress!, wire))
+                        return;
                     await _messenger.SendBinaryAsync(wire, _peerAddress!, ct).ConfigureAwait(false);
                 }
 
@@ -2268,6 +2310,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// <summary>TRL-7: push local AboutMe + Avatar to this chat peer (not stored in chat history).</summary>
     public async Task SendLocalUserInfoAsync(CancellationToken cancellationToken = default)
     {
+        if (IsMeshtasticPathActive)
+        {
+            LogMeshtasticBinarySkip("UserInfo/avatar");
+            return;
+        }
+
         var user = _auth.CurrentUser ?? _user;
         var about = user.AboutMe ?? "";
         var wire = ChatWireCodec.EncodeUserInfo(about, user.Avatar ?? Array.Empty<byte>());
@@ -2408,7 +2456,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (imageBytes.Length == 0)
             throw new ArgumentException("Image is empty.", nameof(imageBytes));
 
-        EnsureMeshtasticAllowsBinary();
+        EnsureMeshtasticAllowsBinary("image");
 
         var bytes = imageBytes.ToArray();
         if (_chat.IsBot)
@@ -2430,7 +2478,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
         if (fileBytes.Length == 0)
             throw new ArgumentException("File is empty.", nameof(fileBytes));
 
-        EnsureMeshtasticAllowsBinary();
+        var binaryLabel = mimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+            ? "voice"
+            : mimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+                ? "video"
+                : "file";
+        EnsureMeshtasticAllowsBinary(binaryLabel);
 
         var bytes = fileBytes.ToArray();
         var safeName = Path.GetFileName(fileName.Trim());
@@ -2467,11 +2520,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
             .ConfigureAwait(false);
     }
 
-    /// <summary>SHO-29 / TRL-33: Meshtastic cannot carry voice/image/document blobs.</summary>
-    private void EnsureMeshtasticAllowsBinary()
+    /// <summary>SHO-29 / SHO-31 / TRL-33 / TRL-34: Meshtastic cannot carry voice/image/document blobs.</summary>
+    private void EnsureMeshtasticAllowsBinary(string what = "binary payload")
     {
         if (!IsMeshtasticPathActive)
             return;
+        LogMeshtasticBinarySkip(what);
         throw new InvalidOperationException(
             "Binary transfers (voice, images, documents) are not allowed on the Meshtastic path.");
     }
@@ -2484,6 +2538,65 @@ public sealed class ChatP2PSession : IAsyncDisposable
         throw new ArgumentException(
             $"Text over {MaxMeshtasticMessageChars} characters is not allowed on the Meshtastic path.",
             nameof(text));
+    }
+
+    private void LogMeshtasticBinarySkip(string what) =>
+        _logger.LogInformation("{Prefix} {What} (chat {ChatId})",
+            MeshtasticBinarySkipLogPrefix, what, _chat.Id);
+
+    private static bool IsForbiddenBinaryPayloadKind(int payloadKind) =>
+        payloadKind is (int)ChatPayloadKind.Image
+            or (int)ChatPayloadKind.File
+            or (int)ChatPayloadKind.TransferOffer
+            or (int)ChatPayloadKind.TransferControl;
+
+    private static string DescribePayloadKind(int payloadKind) => payloadKind switch
+    {
+        (int)ChatPayloadKind.Image => "image",
+        (int)ChatPayloadKind.File => "file",
+        (int)ChatPayloadKind.TransferOffer => "transfer offer",
+        (int)ChatPayloadKind.TransferControl => "transfer control",
+        _ => $"payload kind {payloadKind}"
+    };
+
+    /// <summary>
+    ///     SHO-31: strip Meshtastic destinations for forbidden wire kinds. Returns false when nothing
+    ///     remains to send (caller must skip). Allowed text/control kinds keep all destinations.
+    /// </summary>
+    private bool TryPrepareOutboundDestinations(
+        byte[] wire,
+        List<TransportAddress> dests,
+        out List<TransportAddress> allowed)
+    {
+        allowed = dests;
+        if (!ChatWireCodec.TryGetKind(wire, out var kind) || !ChatWireCodec.IsForbiddenOnMeshtastic(kind))
+            return dests.Count > 0;
+
+        var label = ChatWireCodec.DescribeForbiddenKind(kind);
+        allowed = dests.Where(d => d.Kind != TransportKind.Meshtastic).ToList();
+        if (allowed.Count == dests.Count)
+            return allowed.Count > 0;
+
+        if (allowed.Count == 0)
+        {
+            LogMeshtasticBinarySkip(label);
+            return false;
+        }
+
+        _logger.LogInformation(
+            "{Prefix} {What} — excluded Meshtastic destination(s), sending via other endpoints (chat {ChatId})",
+            MeshtasticBinarySkipLogPrefix, label, _chat.Id);
+        return true;
+    }
+
+    private bool ShouldSkipMeshtasticDestination(TransportAddress destination, byte[] wire)
+    {
+        if (destination.Kind != TransportKind.Meshtastic)
+            return false;
+        if (!ChatWireCodec.TryGetKind(wire, out var kind) || !ChatWireCodec.IsForbiddenOnMeshtastic(kind))
+            return false;
+        LogMeshtasticBinarySkip(ChatWireCodec.DescribeForbiddenKind(kind));
+        return true;
     }
 
     public async Task RequestBinaryDownloadAsync(int messageId, CancellationToken cancellationToken = default)
@@ -2501,6 +2614,12 @@ public sealed class ChatP2PSession : IAsyncDisposable
         }
         if (state == ChatTransferState.Transferring)
             return;
+
+        if (IsMeshtasticPathActive)
+        {
+            LogMeshtasticBinarySkip($"transfer download request for message {messageId}");
+            return;
+        }
 
         await _repo.UpdateTransferStateAsync(messageId, ChatTransferState.Transferring).ConfigureAwait(false);
         TransferStateChanged?.Invoke(this, messageId);
@@ -2807,6 +2926,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
         byte[] bytes,
         CancellationToken cancellationToken)
     {
+        // Defense in depth: callers already gate, but never queue a transfer wire for mesh-only chats.
+        EnsureMeshtasticAllowsBinary(
+            string.IsNullOrWhiteSpace(payloadKind) ? "transfer offer" : payloadKind);
+
         var messageId = await _repo
             .AddFileMessageAsync(_chat.Id, true, fileName, mimeType, bytes, MessageDeliveryStatus.Pending)
             .ConfigureAwait(false);

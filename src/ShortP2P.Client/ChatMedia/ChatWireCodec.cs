@@ -29,6 +29,34 @@ public static class ChatWireCodec
         return payload.Length >= Magic.Length && payload.StartsWith(Magic);
     }
 
+    /// <summary>SHO-31: peek framed wire kind after S2P1 magic (false for legacy raw UTF-8).</summary>
+    public static bool TryGetKind(ReadOnlySpan<byte> payload, out byte kind)
+    {
+        kind = 0;
+        if (payload.Length < Magic.Length + 1 || !payload.StartsWith(Magic))
+            return false;
+        kind = payload[Magic.Length];
+        return true;
+    }
+
+    /// <summary>
+    ///     SHO-31: avatar/UserInfo and any blob-carrying ChatWire kinds must not go over Meshtastic/LoRa.
+    ///     Text / compressed text / vocab / session probe remain allowed.
+    /// </summary>
+    public static bool IsForbiddenOnMeshtastic(byte kind) =>
+        kind is KindImage or KindFile or KindTransferOffer or KindTransferControl or KindUserInfo;
+
+    /// <summary>Short English label for Meshtastic skip logs (SHO-31).</summary>
+    public static string DescribeForbiddenKind(byte kind) => kind switch
+    {
+        KindImage => "image",
+        KindFile => "file",
+        KindTransferOffer => "transfer offer",
+        KindTransferControl => "transfer control",
+        KindUserInfo => "UserInfo/avatar",
+        _ => $"wire kind 0x{kind:X2}"
+    };
+
     public static byte[] EncodeText(string text)
     {
         var utf8 = Encoding.UTF8.GetBytes(text);
