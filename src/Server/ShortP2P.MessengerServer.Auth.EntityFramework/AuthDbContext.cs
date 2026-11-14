@@ -19,6 +19,7 @@ public sealed class AuthDbContext(DbContextOptions<AuthDbContext> options) : DbC
             e.Property(x => x.Nick).HasMaxLength(256);
             e.Property(x => x.PasswordSalt).HasMaxLength(128);
             e.Property(x => x.PasswordHash).HasMaxLength(128);
+            e.Property(x => x.VisibleForSearch).HasDefaultValue(true);
         });
 
         modelBuilder.Entity<BotAccountEntity>(e =>

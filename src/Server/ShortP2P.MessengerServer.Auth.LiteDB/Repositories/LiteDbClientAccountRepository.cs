@@ -60,6 +60,23 @@ public sealed class LiteDbClientAccountRepository : IClientAccountRepository, ID
         return Task.CompletedTask;
     }
 
+    public Task UpdateVisibilityAsync(
+        string networkId,
+        bool visibleForSearch,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var doc = _accounts.FindById(networkId)
+                ?? throw new InvalidOperationException($"Account '{networkId}' was not found.");
+            doc.VisibleForSearch = visibleForSearch;
+            _accounts.Update(doc);
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyList<ClientAccount>> ListAllAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

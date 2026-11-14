@@ -918,6 +918,9 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         Settings.SuggestBluetoothPairing = persisted.SuggestBluetoothPairing;
         Settings.TrafficQuality = persisted.TrafficQuality;
         Settings.AdvertisedPeerCapabilities = persisted.AdvertisedPeerCapabilities | PresencePeerCapabilities.Chat;
+        Settings.VisibleForSearch = persisted.VisibleForSearch;
+        if (MessengerServers != null)
+            MessengerServers.Manager.VisibleForSearch = Settings.VisibleForSearch;
         _bluetooth?.SetLocalNetworkId(CompressedNetworkId.FromShortString(user.NetworkIdShort));
         _bluetooth?.ApplySettings(Settings);
 
@@ -957,6 +960,7 @@ public sealed class UserP2pRuntime : IAsyncDisposable
             // LAN presence can fail (bind denied) while invite/data UDP already work.
             // Still start messenger-server long-poll so send/receive via servers stays up.
             MessengerServers?.Start();
+            await PushSearchVisibilityAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -968,6 +972,17 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         }
 
         MessengerServers?.Start();
+        await PushSearchVisibilityAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Best-effort sync of local VisibleForSearch to all known messenger servers.</summary>
+    public Task PushSearchVisibilityAsync(CancellationToken cancellationToken = default)
+    {
+        var servers = MessengerServers;
+        if (servers == null)
+            return Task.CompletedTask;
+        servers.Manager.VisibleForSearch = Settings.VisibleForSearch;
+        return servers.ChangeVisibilityOnAllServersAsync(Settings.VisibleForSearch, cancellationToken);
     }
 
     private void OnDiscoveryPingReceived(object? sender, DiscoveryPingReceivedEventArgs e)

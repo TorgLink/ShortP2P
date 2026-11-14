@@ -31,6 +31,21 @@ public sealed class EfClientAccountRepository(AuthDbContext db) : IClientAccount
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task UpdateVisibilityAsync(
+        string networkId,
+        bool visibleForSearch,
+        CancellationToken cancellationToken = default)
+    {
+        var row = await db.Accounts
+            .FirstOrDefaultAsync(x => x.NetworkId == networkId, cancellationToken)
+            .ConfigureAwait(false);
+        if (row is null)
+            throw new InvalidOperationException($"Account '{networkId}' was not found.");
+
+        row.VisibleForSearch = visibleForSearch;
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<ClientAccount>> ListAllAsync(CancellationToken cancellationToken = default)
     {
         var rows = await db.Accounts.AsNoTracking()

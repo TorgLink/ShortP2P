@@ -45,7 +45,8 @@ public sealed class GetClientPresencesUseCase(
                     account.NetworkId,
                     account.Nick,
                     online ? ClientOnlineStatus.Online : ClientOnlineStatus.Offline,
-                    lastSeen);
+                    lastSeen,
+                    account.VisibleForSearch);
             })
             .ToArray();
     }
