@@ -79,7 +79,8 @@ public static class DtoMapping
         Status = info.Status == ClientOnlineStatus.Online
             ? ClientPresenceDto.StatusOnline
             : ClientPresenceDto.StatusOffline,
-        LastSeenAtUtc = info.LastSeenAtUtc
+        LastSeenAtUtc = info.LastSeenAtUtc,
+        VisibleForSearch = info.VisibleForSearch
     };
 
     public static ForwardDto ToDto(this ForwardEnvelope envelope) => new()

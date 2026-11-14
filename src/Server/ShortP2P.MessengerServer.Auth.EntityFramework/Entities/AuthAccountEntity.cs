@@ -9,6 +9,7 @@ public sealed class AuthAccountEntity
     public string PasswordSalt { get; set; } = "";
     public string PasswordHash { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; }
+    public bool VisibleForSearch { get; set; } = true;
 
     public ClientAccount ToDomain() => new()
     {
@@ -16,7 +17,8 @@ public sealed class AuthAccountEntity
         Nick = Nick,
         PasswordSalt = PasswordSalt,
         PasswordHash = PasswordHash,
-        CreatedAtUtc = CreatedAtUtc
+        CreatedAtUtc = CreatedAtUtc,
+        VisibleForSearch = VisibleForSearch
     };
 
     public static AuthAccountEntity FromDomain(ClientAccount account) => new()
@@ -25,6 +27,7 @@ public sealed class AuthAccountEntity
         Nick = account.Nick,
         PasswordSalt = account.PasswordSalt,
         PasswordHash = account.PasswordHash,
-        CreatedAtUtc = account.CreatedAtUtc
+        CreatedAtUtc = account.CreatedAtUtc,
+        VisibleForSearch = account.VisibleForSearch
     };
 }

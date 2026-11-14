@@ -71,6 +71,26 @@ internal sealed class FakeClientAccountRepository(FakeStores store) : IClientAcc
         return Task.CompletedTask;
     }
 
+    public Task UpdateVisibilityAsync(
+        string networkId,
+        bool visibleForSearch,
+        CancellationToken cancellationToken = default)
+    {
+        if (!store.Accounts.TryGetValue(networkId, out var existing))
+            throw new InvalidOperationException($"Account '{networkId}' was not found.");
+
+        store.Accounts[networkId] = new ClientAccount
+        {
+            Nick = existing.Nick,
+            NetworkId = existing.NetworkId,
+            PasswordSalt = existing.PasswordSalt,
+            PasswordHash = existing.PasswordHash,
+            CreatedAtUtc = existing.CreatedAtUtc,
+            VisibleForSearch = visibleForSearch
+        };
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyList<ClientAccount>> ListAllAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<ClientAccount>>(store.Accounts.Values.ToArray());
 }

@@ -35,6 +35,12 @@ public sealed class MessengerServerManager : IAsyncDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private int _failoverBusy;
 
+    /// <summary>
+    /// Search visibility used when registering a new account on a messenger server (default true).
+    /// Hosts should keep this in sync with <c>P2pRoutingSettings.VisibleForSearch</c>.
+    /// </summary>
+    public bool VisibleForSearch { get; set; } = true;
+
     public MessengerServerManager(
         IMessengerServerRepository repository,
         AuthService auth,
@@ -816,7 +822,8 @@ public sealed class MessengerServerManager : IAsyncDisposable
                         Nick = entity.Nick,
                         NetworkId = entity.NetworkId,
                         Password = entity.AccountPassword,
-                        DeviceId = deviceId
+                        DeviceId = deviceId,
+                        VisibleForSearch = VisibleForSearch
                     },
                     cancellationToken).ConfigureAwait(false);
                 entity.IsRegistered = true;

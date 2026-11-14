@@ -40,6 +40,7 @@ public static class UseCasesServiceCollectionExtensions
         services.AddScoped<DeviceFanoutService>();
         services.AddScoped<RegisterClientUseCase>();
         services.AddScoped<LoginClientUseCase>();
+        services.AddScoped<ChangeVisibilityUseCase>();
         services.AddScoped<GetChatsUseCase>();
         services.AddScoped<CreateChatRequestUseCase>();
         services.AddScoped<SendMessageUseCase>();

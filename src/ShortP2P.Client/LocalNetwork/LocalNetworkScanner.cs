@@ -465,6 +465,8 @@ public sealed class LocalNetworkScanner(
     public async Task SendUnicastPresencePingAsync(TransportAddress bluetoothDestination,
         CancellationToken cancellationToken = default)
     {
+        if (!routingSettings.VisibleForSearch)
+            return;
         if (bluetoothDestination.Kind != TransportKind.Bluetooth)
             return;
         if (!IsTransportEnabled(TransportKind.Bluetooth))
@@ -1074,6 +1076,11 @@ public sealed class LocalNetworkScanner(
         var localPeer = _localPeer;
         if (localPeer == null)
             return true;
+
+        // Hidden from search: consume the probe without advertising ourselves.
+        if (!routingSettings.VisibleForSearch)
+            return true;
+
         var myId = localPeer.NetworkId;
 
         if (sender == myId)
@@ -1239,6 +1246,10 @@ public sealed class LocalNetworkScanner(
                 // servers / external discovery must not block UDP/BT rounds
             }
         }
+
+        // Still refresh GetClients directory above; do not advertise presence when hidden.
+        if (!routingSettings.VisibleForSearch)
+            return;
 
         var localPeer = _localPeer;
         var presenceUdp = _presenceUdp;

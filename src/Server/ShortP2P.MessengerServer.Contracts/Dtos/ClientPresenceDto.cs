@@ -16,6 +16,12 @@ public sealed class ClientPresenceDto
     /// <summary>Last keep-alive (or registration) time UTC.</summary>
     public required DateTime LastSeenAtUtc { get; init; }
 
+    /// <summary>
+    /// When false, clients should hide this entry from search UI.
+    /// Still returned so routing / registration checks keep working for known peers.
+    /// </summary>
+    public bool VisibleForSearch { get; init; } = true;
+
     public bool IsOnline =>
         string.Equals(Status, StatusOnline, StringComparison.OrdinalIgnoreCase);
 }

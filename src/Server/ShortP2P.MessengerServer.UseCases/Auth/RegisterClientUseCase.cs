@@ -31,7 +31,8 @@ public sealed class RegisterClientUseCase(
                 NetworkId = networkId,
                 PasswordSalt = hashed.Salt,
                 PasswordHash = hashed.Hash,
-                CreatedAtUtc = now
+                CreatedAtUtc = now,
+                VisibleForSearch = command.VisibleForSearch
             },
             cancellationToken).ConfigureAwait(false);
 

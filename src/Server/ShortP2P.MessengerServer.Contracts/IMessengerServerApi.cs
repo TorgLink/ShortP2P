@@ -15,6 +15,9 @@ public interface IMessengerServerApi
     /// <summary>POST <see cref="ApiRoutes.Login"/> — authorize by networkId, password and deviceId.</summary>
     Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
 
+    /// <summary>POST <see cref="ApiRoutes.ChangeVisibility"/> — set search visibility for the authenticated client.</summary>
+    Task ChangeVisibilityAsync(ChangeVisibilityRequest request, CancellationToken cancellationToken = default);
+
     /// <summary>GET <see cref="ApiRoutes.ServerCertificate"/> — server TLS certificate fingerprint.</summary>
     Task<ServerCertificateResponse> GetServerCertificateAsync(CancellationToken cancellationToken = default);
 

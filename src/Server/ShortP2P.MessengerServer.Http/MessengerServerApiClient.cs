@@ -36,6 +36,19 @@ public sealed class MessengerServerApiClient(
         return login;
     }
 
+    public async Task ChangeVisibilityAsync(
+        ChangeVisibilityRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        Require.NotNull(request);
+
+        using var response = await httpClient
+            .PostAsync(ApiRoutes.ChangeVisibility, MessengerServerJson.ToJsonContent(request), cancellationToken)
+            .ConfigureAwait(false);
+
+        await MessengerServerJson.EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<ServerCertificateResponse> GetServerCertificateAsync(
         CancellationToken cancellationToken = default)
     {

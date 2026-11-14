@@ -41,6 +41,11 @@ partial class AuthDbContextModelSnapshot : ModelSnapshot
                     .HasMaxLength(128)
                     .HasColumnType("TEXT");
 
+                b.Property<bool>("VisibleForSearch")
+                    .ValueGeneratedOnAdd()
+                    .HasColumnType("INTEGER")
+                    .HasDefaultValue(true);
+
                 b.HasKey("NetworkId");
 
                 b.HasIndex("Nick")

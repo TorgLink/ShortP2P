@@ -12,4 +12,9 @@ public sealed class RegisterRequest
 
     /// <summary>Device id: lowercase hex SHA-256 (64 chars) of install GUID.</summary>
     public required string DeviceId { get; init; }
+
+    /// <summary>
+    /// When false, the new account is hidden from search. Omitted or null → visible (default).
+    /// </summary>
+    public bool? VisibleForSearch { get; init; }
 }

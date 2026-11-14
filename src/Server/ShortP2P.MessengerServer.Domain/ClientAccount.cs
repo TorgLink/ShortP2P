@@ -13,4 +13,10 @@ public sealed class ClientAccount
 
     /// <summary>Creation time UTC.</summary>
     public required DateTime CreatedAtUtc { get; init; }
+
+    /// <summary>
+    /// When false, the account is omitted from search directories; invites and messaging still work.
+    /// Default is visible.
+    /// </summary>
+    public bool VisibleForSearch { get; init; } = true;
 }

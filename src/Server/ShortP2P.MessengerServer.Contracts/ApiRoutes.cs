@@ -13,6 +13,9 @@ public static class ApiRoutes
     public const string Register = Prefix + "/auth/register";
     public const string Login = Prefix + "/auth/login";
 
+    /// <summary>POST update caller's search visibility (<see cref="Dtos.ChangeVisibilityRequest"/>).</summary>
+    public const string ChangeVisibility = Prefix + "/auth/visibility";
+
     public const string ServerCertificate = Prefix + "/server/certificate";
 
     public const string Chats = Prefix + "/chats";
