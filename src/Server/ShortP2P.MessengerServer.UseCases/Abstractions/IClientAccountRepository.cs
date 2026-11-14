@@ -10,5 +10,8 @@ public interface IClientAccountRepository
 
     Task AddAsync(ClientAccount account, CancellationToken cancellationToken = default);
 
+    /// <summary>Updates <see cref="ClientAccount.VisibleForSearch"/> for an existing account.</summary>
+    Task UpdateVisibilityAsync(string networkId, bool visibleForSearch, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<ClientAccount>> ListAllAsync(CancellationToken cancellationToken = default);
 }

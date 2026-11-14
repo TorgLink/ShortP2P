@@ -9,6 +9,7 @@ internal sealed class AuthAccountDocument
     public string PasswordSalt { get; set; } = "";
     public string PasswordHash { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; }
+    public bool VisibleForSearch { get; set; } = true;
 
     public ClientAccount ToDomain() => new()
     {
@@ -16,7 +17,8 @@ internal sealed class AuthAccountDocument
         Nick = Nick,
         PasswordSalt = PasswordSalt,
         PasswordHash = PasswordHash,
-        CreatedAtUtc = CreatedAtUtc
+        CreatedAtUtc = CreatedAtUtc,
+        VisibleForSearch = VisibleForSearch
     };
 
     public static AuthAccountDocument FromDomain(ClientAccount account) => new()
@@ -25,6 +27,7 @@ internal sealed class AuthAccountDocument
         Nick = account.Nick,
         PasswordSalt = account.PasswordSalt,
         PasswordHash = account.PasswordHash,
-        CreatedAtUtc = account.CreatedAtUtc
+        CreatedAtUtc = account.CreatedAtUtc,
+        VisibleForSearch = account.VisibleForSearch
     };
 }

@@ -47,6 +47,9 @@ internal sealed class TestHarness
     public RegisterClientUseCase RegisterClient() =>
         new(Stores.AccountsRepo, Stores.StatusesRepo, PasswordHasher, Clock);
 
+    public ChangeVisibilityUseCase ChangeVisibility() =>
+        new(Stores.AccountsRepo);
+
     public LoginClientUseCase LoginClient() =>
         new(Stores.AccountsRepo, Stores.StatusesRepo, PasswordHasher, TokenService, Fanout, Clock);
 

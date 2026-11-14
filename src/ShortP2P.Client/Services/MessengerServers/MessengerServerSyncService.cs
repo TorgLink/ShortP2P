@@ -1445,6 +1445,37 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Pushes search visibility to all ready trusted servers (best-effort).
+    /// Invites and messaging are unaffected; only the search directory flag changes.
+    /// </summary>
+    public async Task ChangeVisibilityOnAllServersAsync(
+        bool visibleForSearch,
+        CancellationToken cancellationToken = default)
+    {
+        _manager.VisibleForSearch = visibleForSearch;
+
+        var ready = await _manager.EnsureAllActiveReadyAsync(cancellationToken).ConfigureAwait(false);
+        var targets = ready.Where(c => _manager.AllowsTraffic(c)).ToArray();
+        if (targets.Length == 0)
+            return;
+
+        var request = new ChangeVisibilityRequest { VisibleForSearch = visibleForSearch };
+        foreach (var conn in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await TrackAsync(conn, () => conn.Api.ChangeVisibilityAsync(request, cancellationToken))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "ChangeVisibility failed on {BaseUrl}", conn.Entity.BaseUrl);
+            }
+        }
+    }
+
+    /// <summary>
     /// Removes the blob from trusted servers after the recipient accepted it.
     /// Failures are ignored: TTL retention still applies.
     /// </summary>
@@ -1595,6 +1626,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
 
             foreach (var client in list)
             {
+                // Hide from search UI only; ReplaceRegisteredClients above still got every NetworkId.
+                if (!client.VisibleForSearch)
+                    continue;
+
                 var id = client.NetworkId.Trim();
                 if (id.Length == 0 ||
                     string.Equals(id, selfNetworkId, StringComparison.Ordinal))

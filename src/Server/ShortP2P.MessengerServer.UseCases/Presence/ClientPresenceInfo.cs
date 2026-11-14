@@ -6,4 +6,5 @@ public sealed record ClientPresenceInfo(
     string NetworkId,
     string Nick,
     ClientOnlineStatus Status,
-    DateTime LastSeenAtUtc);
+    DateTime LastSeenAtUtc,
+    bool VisibleForSearch = true);

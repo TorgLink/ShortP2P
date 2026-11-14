@@ -47,4 +47,10 @@ public sealed class P2pRoutingSettings
     ///     <see cref="PresencePeerCapabilities.PeerSearch" /> — ответ на UDP-запрос маршрутной таблицы.
     /// </summary>
     public PresencePeerCapabilities AdvertisedPeerCapabilities { get; set; } = PresencePeerCapabilities.Chat;
+
+    /// <summary>
+    ///     Видимость в поиске / каталоге GetClients. По умолчанию включена.
+    ///     При false: не отвечаем на discovery и не шлём presence ping; инвайты и прочий трафик не затрагиваются.
+    /// </summary>
+    public bool VisibleForSearch { get; set; } = true;
 }
