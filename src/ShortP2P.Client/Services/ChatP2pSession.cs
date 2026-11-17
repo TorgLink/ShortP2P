@@ -1166,14 +1166,13 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         try
                         {
                             _media.ValidateDocumentMime(f.MimeType);
-                            _media.ValidateFileSize(f.MimeType, f.FileBytes.Length, CurrentTrafficQuality);
                             _ = await _repo.AddFileMessageAsync(_chat.Id, false, f.FileName, f.MimeType, f.FileBytes)
                                 .ConfigureAwait(false);
                         }
                         catch
                         {
                             _ = await _repo.AddMessageAsync(_chat.Id, false,
-                                    "[Входящий файл отклонён: неподдерживаемый тип или размер.]")
+                                    "[Входящий файл отклонён: неподдерживаемый тип.]")
                                 .ConfigureAwait(false);
                         }
                     }
@@ -2634,7 +2633,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 if (!_chat.IsBot)
                 {
                     _media.ValidateMime(img.MimeType);
-                    _media.ValidateSize(img.ImageBytes.Length, CurrentTrafficQuality);
                 }
 
                 bytes = img.ImageBytes;
@@ -2646,7 +2644,6 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 if (!_chat.IsBot)
                 {
                     _media.ValidateDocumentMime(f.MimeType);
-                    _media.ValidateFileSize(f.MimeType, f.FileBytes.Length, CurrentTrafficQuality);
                 }
 
                 bytes = f.FileBytes;
