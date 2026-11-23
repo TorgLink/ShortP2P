@@ -68,7 +68,10 @@ public interface IMessengerServerApi
     /// <summary>GET <see cref="ApiRoutes.Blobs"/>/{blobId}/chunks/{index} — one ciphertext chunk.</summary>
     Task<byte[]> GetBlobChunkAsync(string blobId, int chunkIndex, CancellationToken cancellationToken = default);
 
-    /// <summary>POST <see cref="ApiRoutes.MessageReceipts"/> — submit a delivery receipt (deletes this device's inbox copy).</summary>
+    /// <summary>
+    /// POST <see cref="ApiRoutes.MessageReceipts"/> — submit a delivery receipt (deletes this device's inbox copy).
+    /// Set <see cref="Dtos.DeliveryReceiptRequest.NotifySender"/> to false to discard without a sender ticket.
+    /// </summary>
     Task SubmitDeliveryReceiptAsync(DeliveryReceiptRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>

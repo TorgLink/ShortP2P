@@ -155,6 +155,29 @@ public class SubmitDeliveryReceiptUseCaseTests
         Assert.True(h.Stores.Messages.ContainsKey("m1"));
         Assert.True(h.Stores.MessageInboxes.ContainsKey(("m1", TestIds.DeviceC)));
     }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenNotifySenderFalse_ClearsInboxWithoutTicket()
+    {
+        var h = new TestHarness();
+        await h.Stores.StatusesRepo.UpsertAsync(new ClientStatuses
+        {
+            NetworkId = "bob",
+            DeviceId = TestIds.DeviceB,
+            Status = ClientOnlineStatus.Online,
+            CreatedAtUtc = TestHarness.T0
+        });
+
+        await h.SendMessage().ExecuteAsync(new SendMessageCommand(
+            TestHarness.NewMessage("m1", "alice", "bob")));
+
+        await h.SubmitDeliveryReceipt().ExecuteAsync(
+            new SubmitDeliveryReceiptCommand("bob", TestIds.DeviceB, "m1", TestHarness.T0, NotifySender: false));
+
+        Assert.False(h.Stores.DeliveryTickets.ContainsKey("m1"));
+        Assert.False(h.Stores.MessageInboxes.ContainsKey(("m1", TestIds.DeviceB)));
+        Assert.False(h.Stores.Messages.ContainsKey("m1"));
+    }
 }
 
 public class GetDeliveryReceiptsUseCaseTests

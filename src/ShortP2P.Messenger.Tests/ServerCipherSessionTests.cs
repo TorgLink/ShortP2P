@@ -116,12 +116,14 @@ public class ServerCipherSessionTests
         var lost = MessengerServerPayloadCodec.Open(
             data, bob.PrivateKey, "alice", new ServerCipherSessionStore());
         Assert.False(lost.ShouldPersistChat);
+        Assert.False(lost.IsRekeyNotice);
         Assert.NotNull(lost.ResponseEnvelope);
         Assert.Equal(5, lost.ResponseEnvelope![1]);
 
         var notice = MessengerServerPayloadCodec.Open(
             lost.ResponseEnvelope, alice.PrivateKey, "bob", aliceStore);
         Assert.False(notice.ShouldPersistChat);
+        Assert.True(notice.IsRekeyNotice);
 
         var again = MessengerServerPayloadCodec.EncryptForSession(
             "m3"u8.ToArray(), bob.PublicKey, "bob", aliceStore, T0.AddSeconds(2));

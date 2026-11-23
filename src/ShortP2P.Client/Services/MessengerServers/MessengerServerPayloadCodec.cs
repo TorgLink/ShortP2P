@@ -366,7 +366,7 @@ public static class MessengerServerPayloadCodec
         if (blob.Length != 2 + SessionIdBytes)
             throw new CryptographicException("Re-key notice has an invalid length.");
         store.DropOutboundIfMatch(peerId, blob.Slice(2, SessionIdBytes));
-        return ServerPayloadOpenResult.Control();
+        return ServerPayloadOpenResult.RekeyNotice();
     }
 
     private static byte[] DecryptGcm(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonceCipherAndTag)

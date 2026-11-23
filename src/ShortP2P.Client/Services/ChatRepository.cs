@@ -888,6 +888,52 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
         }).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Moves outgoing <see cref="MessageDeliveryStatus.Sent"/> rows in a chat back to
+    /// <see cref="MessageDeliveryStatus.Pending"/> and clears their server-message mappings
+    /// so they can be re-posted after a messenger-server cipher re-key.
+    /// </summary>
+    public async Task<IReadOnlyList<int>> RequeueSentOutgoingAsPendingAsync(int chatId)
+    {
+        if (chatId <= 0)
+            return Array.Empty<int>();
+
+        return await _db.WriteAsync(async conn =>
+        {
+            var rows = await conn.QueryAsync<IdOnlyRow>(
+                    "SELECT Id FROM messages WHERE ChatId = ? AND Outgoing = 1 AND DeliveryStatus = ? ORDER BY Id ASC",
+                    chatId,
+                    (int)MessageDeliveryStatus.Sent)
+                .ConfigureAwait(false);
+
+            if (rows.Count == 0)
+                return (IReadOnlyList<int>)Array.Empty<int>();
+
+            var ids = new List<int>(rows.Count);
+            foreach (var row in rows)
+            {
+                await conn.ExecuteAsync(
+                        "UPDATE messages SET DeliveryStatus = ? WHERE Id = ?",
+                        (int)MessageDeliveryStatus.Pending,
+                        row.Id)
+                    .ConfigureAwait(false);
+                ids.Add(row.Id);
+            }
+
+            await conn.ExecuteAsync(
+                    "DELETE FROM outgoing_server_messages WHERE ChatId = ?",
+                    chatId)
+                .ConfigureAwait(false);
+
+            return ids;
+        }).ConfigureAwait(false);
+    }
+
+    private sealed class IdOnlyRow
+    {
+        public int Id { get; set; }
+    }
+
     public async Task<int> AddMessageAsync(int chatId, bool outgoing, string text,
         MessageDeliveryStatus deliveryStatus = MessageDeliveryStatus.Delivered)
     {

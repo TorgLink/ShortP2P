@@ -50,7 +50,12 @@ public sealed class MessagesController(
             var deviceId = HttpContext.RequireDeviceId();
             await submitReceiptUseCase
                 .ExecuteAsync(
-                    new SubmitDeliveryReceiptCommand(caller, deviceId, request.MessageId, request.ReceivedAtUtc),
+                    new SubmitDeliveryReceiptCommand(
+                        caller,
+                        deviceId,
+                        request.MessageId,
+                        request.ReceivedAtUtc,
+                        NotifySender: request.NotifySender ?? true),
                     cancellationToken)
                 .ConfigureAwait(false);
 

@@ -410,6 +410,39 @@ public sealed class ChatP2PSession : IAsyncDisposable
     /// </summary>
     public void NotifyMessagesChangedFromExternal() => RaiseMessagesChanged();
 
+    /// <summary>
+    /// Peer asked for a messenger-server cipher re-key: return outstanding Sent rows to Pending and flush.
+    /// </summary>
+    public Task OnServerCipherRekeyAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return OnServerCipherRekeyCoreAsync();
+    }
+
+    private async Task OnServerCipherRekeyCoreAsync()
+    {
+        var ids = await _repo.RequeueSentOutgoingAsPendingAsync(_chat.Id).ConfigureAwait(false);
+        if (ids.Count == 0)
+            return;
+
+        _logger.LogInformation(
+            "Chat {ChatId}: server cipher re-key — requeued {Count} Sent message(s) as Pending",
+            _chat.Id, ids.Count);
+
+        lock (_pendingSync)
+        {
+            foreach (var id in ids)
+            {
+                if (!_pendingOutgoing.Contains(id))
+                    _pendingOutgoing.Add(id);
+            }
+        }
+
+        RaiseMessagesChanged();
+        HookPresenceForPendingFlush();
+        StartFlushPendingInBackground();
+    }
+
     /// <summary>Текущий статус handshake для шапки чата.</summary>
     public ChatHandshakeStatus HandshakeStatus => _handshakeStatus;
 

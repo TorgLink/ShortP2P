@@ -2595,6 +2595,19 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                 }
             }
 
+            if (opened.IsRekeyNotice)
+            {
+                try
+                {
+                    await HandleServerCipherRekeyAsync(user, peerId, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Server cipher re-key handling failed for peer {PeerId}", peerId);
+                }
+            }
+
+            var contentAccepted = false;
             var wire = opened.ChatWire;
             if (wire != null)
             {
@@ -2608,9 +2621,9 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                         "Skipping server message {MessageId}: no local chat for peer {PeerId}",
                         message.MessageId,
                         peerId);
-                    continue;
                 }
-
+                else
+                {
                 var blocked = await _chats.IsPeerBlockedAsync(user.Id, peerId, cancellationToken)
                     .ConfigureAwait(false);
 
@@ -2621,6 +2634,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                         "Duplicate server message {MessageId} from {BaseUrl} — skip ingest, still ack",
                         message.MessageId,
                         connection.Entity.BaseUrl);
+                    contentAccepted = true;
                 }
                 else
                 {
@@ -2630,6 +2644,8 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                     _logger.LogDebug(
                         "Persisted server message {MessageId} chat={ChatId} IsBot={IsBot} wireLen={WireLen}",
                         message.MessageId, chat.Id, chat.IsBot, wire.Length);
+                    contentAccepted = true;
+                }
                 }
             }
             finally
@@ -2638,14 +2654,16 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             }
             }
 
-            // Ack on every server that delivered a copy, even if we already displayed it once.
+            // Notify the sender only when chat content was accepted. Control-only frames
+            // (unknown session → re-key, probe ack) discard the inbox copy without a ticket.
             try
             {
                 await TrackAsync(connection, () => connection.Api.SubmitDeliveryReceiptAsync(
                     new DeliveryReceiptRequest
                     {
                         MessageId = message.MessageId,
-                        ReceivedAtUtc = DateTime.UtcNow
+                        ReceivedAtUtc = DateTime.UtcNow,
+                        NotifySender = contentAccepted
                     },
                     cancellationToken)).ConfigureAwait(false);
             }
@@ -2653,6 +2671,33 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             {
                 _logger.LogError(ex, "Delivery receipt failed for {MessageId}", message.MessageId);
             }
+        }
+    }
+
+    private async Task HandleServerCipherRekeyAsync(
+        UserEntity user,
+        string peerId,
+        CancellationToken cancellationToken)
+    {
+        var chat = await _chats.FindChatByPeerNetworkIdAsync(user.Id, peerId).ConfigureAwait(false);
+        if (chat == null)
+        {
+            _logger.LogDebug("Server cipher re-key: no local chat for peer {PeerId}", peerId);
+            return;
+        }
+
+        if (_sessions.TryGetSession(chat.Id, out var session) && session != null)
+        {
+            await session.OnServerCipherRekeyAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var ids = await _chats.RequeueSentOutgoingAsPendingAsync(chat.Id).ConfigureAwait(false);
+        if (ids.Count > 0)
+        {
+            _logger.LogInformation(
+                "Server cipher re-key: requeued {Count} Sent message(s) as Pending for chat {ChatId} (session not started)",
+                ids.Count, chat.Id);
         }
     }
 
