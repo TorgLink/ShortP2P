@@ -21,7 +21,8 @@ public static class TrafficQualityModeExtensions
 
     public const int NormalVideoWidth = 854;
     public const int NormalVideoHeight = 480;
-    public const int EconomyVideoWidth = 426;
+    /// <summary>H.264-friendly width (multiple of 16). Was 426; MediaTranscoder often rejects non-aligned sizes.</summary>
+    public const int EconomyVideoWidth = 432;
     public const int EconomyVideoHeight = 240;
     public const int UltraEconomyVideoWidth = 256;
     public const int UltraEconomyVideoHeight = 144;
