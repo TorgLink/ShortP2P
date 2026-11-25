@@ -198,7 +198,7 @@ public sealed class ChatP2PSession
         byte[] wire;
         try
         {
-            var privateKey = RsaKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
+            var privateKey = IdentityKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
             var opened = MessengerServerPayloadCodec.Open(
                 ciphertext, privateKey, _chat.PeerNetworkIdShort, ServerCipherSessionStore.Shared);
             if (opened.ChatWire == null)

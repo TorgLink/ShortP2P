@@ -30,7 +30,7 @@ public sealed class PeerQrPayload
 
     [JsonPropertyName("id")] public string Id { get; set; } = "";
 
-    /// <summary>RSA public key JSON (same format as <see cref="T:ShortP2P.Crypto.RsaKeySerializer" />).</summary>
+    /// <summary>RSA public key JSON (same format as <see cref="T:ShortP2P.Crypto.IdentityKeySerializer" />).</summary>
     [JsonPropertyName("k")]
     public string K { get; set; } = "";
 

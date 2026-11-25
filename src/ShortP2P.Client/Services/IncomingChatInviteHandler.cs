@@ -13,6 +13,7 @@ namespace ShortP2P.Client.Services;
 /// <summary>
 ///     Добавляет чат с инициатором в БД и уведомляет <see cref="ChatRepository.ChatListChanged" />; ответный invite
 ///     уходит в фоне, чтобы список чатов обновлялся сразу и приёмник не ждал отправки.
+///     V2: NetworkId must match identity public key; first contact is TOFU; key change requires explicit accept.
 /// </summary>
 public static class IncomingChatInviteHandler
 {
@@ -44,12 +45,13 @@ public static class IncomingChatInviteHandler
         if (peerId == CompressedNetworkId.FromShortString(user.NetworkIdShort))
             return;
 
-        try
+        if (!IdentityKeySerializer.TryDeserializePublic(pubJson, out var peerPub))
+            return;
+
+        if (!peerId.MatchesIdentityPublicKey(peerPub))
         {
-            RsaKeySerializer.DeserializePublic(pubJson);
-        }
-        catch
-        {
+            Trace.TraceWarning(
+                $"[Invite] rejected: NetworkId {peerId.ToShortString()} does not match identity public key");
             return;
         }
 
@@ -63,6 +65,18 @@ public static class IncomingChatInviteHandler
             : PeerKeySource.Udp();
         if (existing != null)
         {
+            var previousKey = existing.PeerRsaPublicJson;
+            var keyChanged = !string.IsNullOrWhiteSpace(previousKey) &&
+                             !IdentityKeySerializer.PublicKeyJsonEquals(previousKey, pubJson);
+
+            if (keyChanged)
+            {
+                // Do not overwrite the pinned key. Stash a pending change for an explicit UI accept.
+                await repo.SetPendingPeerKeyChangeAsync(existing.Id, pubJson, nick, effectiveHost, keySource)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             var mergedHost = PeerHostList.WithPrimaryFirst(existing.PeerHost, effectiveHost);
             var chatPeerPort = existing.PeerPort is < 1 or > 65535 || existing.PeerPort == ChatInviteCodec.InviteUdpPort
                 ? PresencePingCodec.DefaultDataUdpPort
@@ -85,6 +99,7 @@ public static class IncomingChatInviteHandler
             return;
         }
 
+        // TOFU: first invite for this NetworkId pins the key.
         await repo.AddChatAsync(user.Id, nick, idShort, pubJson, effectiveHost, PresencePingCodec.DefaultDataUdpPort,
                 remote: true, keySource: keySource).ConfigureAwait(false);
 
@@ -131,7 +146,7 @@ public static class IncomingChatInviteHandler
             TimeSpan.FromSeconds(2));
         var nid = CompressedNetworkId.FromShortString(user.NetworkIdShort);
         var reply = ChatInviteCodec.Build(user.Nickname, nid,
-            RsaKeySerializer.SerializePublic(auth.GetCurrentPublicKey()), myHost, ChatInviteCodec.InviteUdpPort);
+            IdentityKeySerializer.SerializePublic(auth.GetCurrentPublicKey()), myHost, ChatInviteCodec.InviteUdpPort);
         var parseHost = PeerHostList.PrimaryHost(inviteHostList);
         var back = sourceAddress ?? UdpTransportAddress.FromIPEndPoint(
             new IPEndPoint(IPAddress.Parse(parseHost), invitePacketPort));

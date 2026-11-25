@@ -1,16 +1,23 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using ShortP2P.Auth.Data;
 using ShortP2P.Crypto;
 
 namespace ShortP2P.Auth;
 
-public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessionStorage)
+public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessionStorage, ILogger<AuthService>? logger = null)
 {
     private const string SessionUserIdKey = "shortp2p_session_user_id";
-    private readonly ISessionStorage _sessionStorage = sessionStorage ?? throw new global::System.ArgumentNullException(nameof(sessionStorage));
-
-    private readonly IUserAuthRepository _users = users ?? throw new global::System.ArgumentNullException(nameof(users));
+    private readonly ISessionStorage _sessionStorage = sessionStorage ?? throw new ArgumentNullException(nameof(sessionStorage));
+    private readonly IUserAuthRepository _users = users ?? throw new ArgumentNullException(nameof(users));
+    private readonly ILogger<AuthService> _logger = logger ?? NullLogger<AuthService>.Instance;
 
     public UserEntity? CurrentUser { get; private set; }
+
+    /// <summary>Set after login/restore when legacy RSA keys were replaced with v2 identity keys.</summary>
+    public IdentityMigrationInfo? PendingIdentityMigrationWarning { get; private set; }
+
+    public void ClearPendingIdentityMigrationWarning() => PendingIdentityMigrationWarning = null;
 
     public async Task<(bool ok, string? error)> RegisterAsync(string nickname, string password)
     {
@@ -21,9 +28,9 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
         if (existing != null)
             return (false, "This nickname is already registered.");
 
-        var networkId = CompressedNetworkId.New();
         var (salt, hash) = PasswordHasher.Hash(password);
         var keys = P2PCrypto.GenerateKeyPair();
+        var networkId = CompressedNetworkId.FromIdentityPublicKey(keys.PublicKey);
 
         var user = new UserEntity
         {
@@ -31,8 +38,8 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
             NetworkIdShort = networkId.ToShortString(),
             PasswordSaltBase64 = salt,
             PasswordHashBase64 = hash,
-            RsaPrivateJson = RsaKeySerializer.SerializePrivate(keys.PrivateKey),
-            RsaPublicJson = RsaKeySerializer.SerializePublic(keys.PublicKey),
+            RsaPrivateJson = IdentityKeySerializer.SerializePrivate(keys.PrivateKey),
+            RsaPublicJson = IdentityKeySerializer.SerializePublic(keys.PublicKey),
             DataUdpPort = 17500,
             CreatedUtcTicks = DateTime.UtcNow.Ticks
         };
@@ -40,6 +47,7 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
         await _users.InsertUserAsync(user).ConfigureAwait(false);
         await PersistSessionAsync(user.Id).ConfigureAwait(false);
         CurrentUser = user;
+        PendingIdentityMigrationWarning = null;
         return (true, null);
     }
 
@@ -62,6 +70,7 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
             await _users.UpdateUserAsync(user).ConfigureAwait(false);
         }
 
+        await MigrateLegacyIdentityIfNeededAsync(user).ConfigureAwait(false);
         await PersistSessionAsync(user.Id).ConfigureAwait(false);
         CurrentUser = user;
         return (true, null);
@@ -70,6 +79,7 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
     public async Task LogoutAsync()
     {
         CurrentUser = null;
+        PendingIdentityMigrationWarning = null;
         _sessionStorage.Remove(SessionUserIdKey);
         await Task.CompletedTask.ConfigureAwait(false);
     }
@@ -81,9 +91,18 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
     public async Task AdoptRestoredUserAsync(UserEntity user)
     {
         if (user == null)
-            throw new global::System.ArgumentNullException(nameof(user));
+            throw new ArgumentNullException(nameof(user));
+        if (!IdentityKeySerializer.TryDeserializePrivate(user.RsaPrivateJson, out _) ||
+            !IdentityKeySerializer.TryDeserializePublic(user.RsaPublicJson, out var pub))
+            throw new InvalidOperationException("Restored profile must contain v2 identity keys.");
+
+        var expectedId = CompressedNetworkId.FromIdentityPublicKey(pub).ToShortString();
+        if (!string.Equals(user.NetworkIdShort.Trim(), expectedId, StringComparison.Ordinal))
+            throw new InvalidOperationException("Restored NetworkId does not match identity public key.");
+
         await PersistSessionAsync(user.Id).ConfigureAwait(false);
         CurrentUser = user;
+        PendingIdentityMigrationWarning = null;
     }
 
     public async Task<bool> TryRestoreSessionAsync()
@@ -95,8 +114,51 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
         var user = await _users.FindByIdAsync(id).ConfigureAwait(false);
         if (user == null)
             return false;
+
+        await MigrateLegacyIdentityIfNeededAsync(user).ConfigureAwait(false);
         CurrentUser = user;
         return true;
+    }
+
+    private async Task MigrateLegacyIdentityIfNeededAsync(UserEntity user)
+    {
+        PendingIdentityMigrationWarning = null;
+        if (IdentityKeySerializer.TryDeserializePrivate(user.RsaPrivateJson, out var existingPriv) &&
+            IdentityKeySerializer.TryDeserializePublic(user.RsaPublicJson, out var existingPub))
+        {
+            // Already v2: ensure NetworkId matches key (repair if corrupted).
+            var expected = CompressedNetworkId.FromIdentityPublicKey(existingPub).ToShortString();
+            if (!string.Equals(user.NetworkIdShort.Trim(), expected, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "Repairing NetworkId for user {UserId}: {OldId} -> {NewId}",
+                    user.Id, user.NetworkIdShort, expected);
+                user.NetworkIdShort = expected;
+                user.RsaPrivateJson = IdentityKeySerializer.SerializePrivate(existingPriv);
+                user.RsaPublicJson = IdentityKeySerializer.SerializePublic(existingPub);
+                await _users.UpdateUserAsync(user).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        var oldId = user.NetworkIdShort;
+        var keys = P2PCrypto.GenerateKeyPair();
+        var newId = CompressedNetworkId.FromIdentityPublicKey(keys.PublicKey).ToShortString();
+        user.NetworkIdShort = newId;
+        user.RsaPrivateJson = IdentityKeySerializer.SerializePrivate(keys.PrivateKey);
+        user.RsaPublicJson = IdentityKeySerializer.SerializePublic(keys.PublicKey);
+        await _users.UpdateUserAsync(user).ConfigureAwait(false);
+
+        PendingIdentityMigrationWarning = new IdentityMigrationInfo
+        {
+            OldNetworkIdShort = oldId,
+            NewNetworkIdShort = newId
+        };
+
+        _logger.LogWarning(
+            "SHO-33 identity migration for user {UserId}: NetworkId {OldId} -> {NewId}; chats must be wiped",
+            user.Id, oldId, newId);
     }
 
     private Task PersistSessionAsync(int userId)
@@ -104,18 +166,18 @@ public sealed class AuthService(IUserAuthRepository users, ISessionStorage sessi
         return _sessionStorage.SetAsync(SessionUserIdKey, userId.ToString());
     }
 
-    public RsaPrivateKey GetCurrentPrivateKey()
+    public IdentityPrivateKey GetCurrentPrivateKey()
     {
         return CurrentUser == null
             ? throw new InvalidOperationException("Not logged in.")
-            : RsaKeySerializer.DeserializePrivate(CurrentUser.RsaPrivateJson);
+            : IdentityKeySerializer.DeserializePrivate(CurrentUser.RsaPrivateJson);
     }
 
-    public RsaPublicKey GetCurrentPublicKey()
+    public IdentityPublicKey GetCurrentPublicKey()
     {
         return CurrentUser == null
             ? throw new InvalidOperationException("Not logged in.")
-            : RsaKeySerializer.DeserializePublic(CurrentUser.RsaPublicJson);
+            : IdentityKeySerializer.DeserializePublic(CurrentUser.RsaPublicJson);
     }
 
     /// <summary>

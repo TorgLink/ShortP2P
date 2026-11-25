@@ -90,7 +90,7 @@ public sealed class MyQrForm : Form
 
         try
         {
-            var pub = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+            var pub = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
             // InviteHostsBuilder → GetAllUnicastIpv6Ordered / public IP — blocking; off UI thread.
             var (payloadJson, png) = await Task.Run(() =>
             {

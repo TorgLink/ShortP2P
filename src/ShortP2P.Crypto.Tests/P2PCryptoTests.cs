@@ -10,23 +10,22 @@ public class P2PCryptoTests
         var kp = P2PCrypto.GenerateKeyPair();
 
         Assert.NotNull(kp);
-        Assert.NotNull(kp.PublicKey);
-        Assert.NotNull(kp.PrivateKey);
+        Assert.Equal(IdentityPublicKey.Ed25519PublicKeyLength, kp.PublicKey.Ed25519Public.Length);
+        Assert.Equal(IdentityPublicKey.X25519PublicKeyLength, kp.PublicKey.X25519Public.Length);
+        Assert.Equal(IdentityPrivateKey.Ed25519SeedLength, kp.PrivateKey.Ed25519Seed.Length);
+        Assert.Equal(IdentityPrivateKey.X25519PrivateKeyLength, kp.PrivateKey.X25519Private.Length);
+    }
 
-        // RSA-1024 => modulus is 128 bytes.
-        Assert.NotNull(kp.PublicKey.Modulus);
-        Assert.Equal(128, kp.PublicKey.Modulus.Length);
-        Assert.NotNull(kp.PublicKey.Exponent);
-        Assert.InRange(kp.PublicKey.Exponent.Length, 1, 4);
+    [Fact]
+    public void NetworkId_ShouldBindToEd25519PublicKey()
+    {
+        var kp = P2PCrypto.GenerateKeyPair();
+        var wire = IdentityKeyDerivation.NetworkIdWireFromPublicKey(kp.PublicKey);
+        Assert.Equal(12, wire.Length);
+        Assert.True(IdentityKeyDerivation.NetworkIdMatchesPublicKey(wire, kp.PublicKey));
 
-        Assert.NotNull(kp.PrivateKey.Modulus);
-        Assert.Equal(128, kp.PrivateKey.Modulus.Length);
-        Assert.NotNull(kp.PrivateKey.D);
-        Assert.NotNull(kp.PrivateKey.P);
-        Assert.NotNull(kp.PrivateKey.Q);
-        Assert.NotNull(kp.PrivateKey.DP);
-        Assert.NotNull(kp.PrivateKey.DQ);
-        Assert.NotNull(kp.PrivateKey.InverseQ);
+        var other = P2PCrypto.GenerateKeyPair();
+        Assert.False(IdentityKeyDerivation.NetworkIdMatchesPublicKey(wire, other.PublicKey));
     }
 
     [Fact]
@@ -38,7 +37,7 @@ public class P2PCryptoTests
         var aliceSession = hs.Session;
         var bobSession = P2PCrypto.CreateSession(bobKeys.PrivateKey, hs.HandshakePacket);
 
-        Assert.Equal(128, hs.HandshakePacket.Length);
+        Assert.Equal(P2PHandshake.HandshakePacketBytes, hs.HandshakePacket.Length);
         Assert.NotNull(aliceSession);
         Assert.NotNull(bobSession);
 
@@ -97,9 +96,7 @@ public class P2PCryptoTests
         }
 
         var data = new byte[len];
-        using var rng = RandomNumberGenerator.Create();
-        rng.GetBytes(data);
-
+        RandomNumberGenerator.Fill(data);
         return data;
     }
 }

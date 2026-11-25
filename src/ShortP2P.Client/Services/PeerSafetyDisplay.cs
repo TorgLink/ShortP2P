@@ -12,7 +12,7 @@ public static class PeerSafetyDisplay
 
     public static string FormatFingerprints(
         string myNick,
-        RsaPublicKey myKey,
+        IdentityPublicKey myKey,
         string peerNick,
         string? peerPublicKeyJson)
     {
@@ -75,6 +75,15 @@ public static class PeerSafetyDisplay
             $"Публичный ключ собеседника «{e.PeerNickname}» изменился.\n\n" +
             $"Было: {e.PreviousSafetyNumber}\nСтало: {e.NewSafetyNumber}\n\n" +
             "Если вы не меняли ключ намеренно, это может быть атака «человек посередине».";
+    }
+
+    public static string FormatKeyChangeProposal(PeerKeyChangeProposedEventArgs e)
+    {
+        return
+            $"Контакт «{e.PeerNickname}» ({e.PeerNetworkIdShort}) предлагает другой публичный ключ.\n\n" +
+            $"Было: {e.PreviousSafetyNumber}\nПредложено: {e.ProposedSafetyNumber}\n\n" +
+            "Примите только если вы уверены, что это тот же человек (например после восстановления из .tlp). " +
+            "Иначе отклоните — это может быть подмена.";
     }
 
     public static string FormatServerEndpoint(string baseUrl)

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Formats.Cbor;
 using System.Security.Cryptography;
+using ShortP2P.Auth.Data;
 using ShortP2P.Crypto;
 
 namespace ShortP2P.Client.ProfileBackup;
@@ -123,6 +124,18 @@ public static class TlpCodec
             throw new InvalidDataException("Nickname is required.");
         if (string.IsNullOrWhiteSpace(document.User.NetworkIdShort))
             throw new InvalidDataException("Network id is required.");
+
+        if (IdentityKeySerializer.IsLegacyRsaJson(document.User.RsaPublicJson) ||
+            IdentityKeySerializer.IsLegacyRsaJson(document.User.RsaPrivateJson))
+            throw new InvalidDataException("Legacy RSA keys are not supported; .tlp must use v2 identity keys.");
+
+        if (!IdentityKeySerializer.TryDeserializePublic(document.User.RsaPublicJson, out var pub) ||
+            !IdentityKeySerializer.TryDeserializePrivate(document.User.RsaPrivateJson, out _))
+            throw new InvalidDataException("v2 identity keys are required.");
+
+        var expectedShort = CompressedNetworkId.FromIdentityPublicKey(pub).ToShortString();
+        if (!string.Equals(document.User.NetworkIdShort.Trim(), expectedShort, StringComparison.Ordinal))
+            throw new InvalidDataException("NetworkId does not match identity public key.");
 
         foreach (var server in document.Servers)
         {
