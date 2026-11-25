@@ -5,9 +5,9 @@ namespace ShortP2P.Client.Services.MessengerServers;
 
 /// <summary>
 /// Messenger-server envelopes, opaque to the server.
-/// Version 1 wraps a fresh AES-GCM key in RSA for every payload (legacy, still used for bots).
-/// Version 2 wraps one session key in RSA (establish). Later payloads and the probe acknowledgement
-/// are AES-GCM only. A new RSA wrap happens only when the probe fails.
+/// Version 1 wraps a fresh AES-GCM key via X25519 sealed-box for every payload (bots).
+/// Version 2 wraps one session key via sealed-box (establish). Later payloads and the probe acknowledgement
+/// are AES-GCM only. A new sealed-box wrap happens only when the probe fails.
 /// </summary>
 public static class MessengerServerPayloadCodec
 {
@@ -24,10 +24,10 @@ public static class MessengerServerPayloadCodec
     private const int NonceBytes = 12;
     private const int TagBytes = 16;
 
-    public static string EncryptToBase64(ReadOnlySpan<byte> plaintext, RsaPublicKey recipientPublicKey) =>
+    public static string EncryptToBase64(ReadOnlySpan<byte> plaintext, IdentityPublicKey recipientPublicKey) =>
         Convert.ToBase64String(Encrypt(plaintext, recipientPublicKey));
 
-    public static byte[] Encrypt(ReadOnlySpan<byte> plaintext, RsaPublicKey recipientPublicKey)
+    public static byte[] Encrypt(ReadOnlySpan<byte> plaintext, IdentityPublicKey recipientPublicKey)
     {
         Require.NotNull(recipientPublicKey);
 
@@ -42,16 +42,7 @@ public static class MessengerServerPayloadCodec
         Buffer.BlockCopy(aesKey, 0, keyMaterial, 0, AesKeyBytes);
         Buffer.BlockCopy(nonce, 0, keyMaterial, AesKeyBytes, NonceBytes);
 
-        byte[] wrappedKey;
-        using (var rsa = CreateRsa())
-        {
-            rsa.ImportParameters(new RSAParameters
-            {
-                Modulus = recipientPublicKey.Modulus,
-                Exponent = recipientPublicKey.Exponent
-            });
-            wrappedKey = rsa.Encrypt(keyMaterial, RSAEncryptionPadding.OaepSHA256);
-        }
+        var wrappedKey = IdentitySealedBox.Seal(recipientPublicKey, keyMaterial);
 
         CryptographicOperations.ZeroMemory(aesKey);
         CryptographicOperations.ZeroMemory(keyMaterial);
@@ -67,13 +58,13 @@ public static class MessengerServerPayloadCodec
         return result;
     }
 
-    public static byte[] DecryptFromBase64(string encryptedDataBase64, RsaPrivateKey privateKey)
+    public static byte[] DecryptFromBase64(string encryptedDataBase64, IdentityPrivateKey privateKey)
     {
         Require.NotNullOrWhiteSpace(encryptedDataBase64);
         return Decrypt(Convert.FromBase64String(encryptedDataBase64.Trim()), privateKey);
     }
 
-    public static byte[] Decrypt(ReadOnlySpan<byte> blob, RsaPrivateKey privateKey)
+    public static byte[] Decrypt(ReadOnlySpan<byte> blob, IdentityPrivateKey privateKey)
     {
         Require.NotNull(privateKey);
 
@@ -95,22 +86,7 @@ public static class MessengerServerPayloadCodec
         var ciphertext = cipherAndTag[..cipherLen].ToArray();
         var tag = cipherAndTag[cipherLen..].ToArray();
 
-        byte[] keyMaterial;
-        using (var rsa = CreateRsa())
-        {
-            rsa.ImportParameters(new RSAParameters
-            {
-                Modulus = privateKey.Modulus,
-                Exponent = privateKey.Exponent,
-                D = privateKey.D,
-                P = privateKey.P,
-                Q = privateKey.Q,
-                DP = privateKey.DP,
-                DQ = privateKey.DQ,
-                InverseQ = privateKey.InverseQ
-            });
-            keyMaterial = rsa.Decrypt(wrappedKey, RSAEncryptionPadding.OaepSHA256);
-        }
+        var keyMaterial = IdentitySealedBox.Open(privateKey, wrappedKey);
 
         if (keyMaterial.Length != AesKeyBytes + NonceBytes)
             throw new CryptographicException("Invalid unwrapped key material.");
@@ -127,11 +103,11 @@ public static class MessengerServerPayloadCodec
 
     /// <summary>
     /// Encrypts a chat wire for a human peer. The first send (and any send after a failed probe)
-    /// RSA-wraps a new session key and carries the wire under that key. Later sends are symmetric.
+    /// sealed-box-wraps a new session key and carries the wire under that key. Later sends are symmetric.
     /// </summary>
     public static byte[] EncryptForSession(
         ReadOnlySpan<byte> plaintext,
-        RsaPublicKey recipientPublicKey,
+        IdentityPublicKey recipientPublicKey,
         string peerId,
         ServerCipherSessionStore store,
         DateTimeOffset? utcNow = null)
@@ -151,7 +127,7 @@ public static class MessengerServerPayloadCodec
     /// </summary>
     public static byte[] EncryptPreferSession(
         ReadOnlySpan<byte> plaintext,
-        RsaPublicKey recipientPublicKey,
+        IdentityPublicKey recipientPublicKey,
         string peerId,
         ServerCipherSessionStore store,
         DateTimeOffset? utcNow = null)
@@ -171,7 +147,7 @@ public static class MessengerServerPayloadCodec
     /// </summary>
     public static ServerPayloadOpenResult Open(
         ReadOnlySpan<byte> blob,
-        RsaPrivateKey privateKey,
+        IdentityPrivateKey privateKey,
         string peerId,
         ServerCipherSessionStore store)
     {
@@ -198,7 +174,7 @@ public static class MessengerServerPayloadCodec
         };
     }
 
-    private static byte[] BuildEstablish(ServerCipherSession session, ReadOnlySpan<byte> chatWire, RsaPublicKey recipient)
+    private static byte[] BuildEstablish(ServerCipherSession session, ReadOnlySpan<byte> chatWire, IdentityPublicKey recipient)
     {
         var token = session.OutstandingProbeToken ??
                     throw new CryptographicException("Session is missing its probe token.");
@@ -216,16 +192,7 @@ public static class MessengerServerPayloadCodec
         Buffer.BlockCopy(session.SessionId, 0, wrappedMaterial, 0, SessionIdBytes);
         Buffer.BlockCopy(session.Key, 0, wrappedMaterial, SessionIdBytes, AesKeyBytes);
 
-        byte[] wrapped;
-        using (var rsa = CreateRsa())
-        {
-            rsa.ImportParameters(new RSAParameters
-            {
-                Modulus = recipient.Modulus,
-                Exponent = recipient.Exponent
-            });
-            wrapped = rsa.Encrypt(wrappedMaterial, RSAEncryptionPadding.OaepSHA256);
-        }
+        var wrapped = IdentitySealedBox.Seal(recipient, wrappedMaterial);
 
         CryptographicOperations.ZeroMemory(wrappedMaterial);
 
@@ -271,7 +238,7 @@ public static class MessengerServerPayloadCodec
 
     private static ServerPayloadOpenResult OpenEstablish(
         ReadOnlySpan<byte> blob,
-        RsaPrivateKey privateKey,
+        IdentityPrivateKey privateKey,
         ServerCipherSessionStore store)
     {
         if (blob.Length < 4 + NonceBytes + ProbeTokenBytes + TagBytes)
@@ -282,22 +249,7 @@ public static class MessengerServerPayloadCodec
             throw new CryptographicException("Invalid session establish key length.");
 
         var wrapped = blob.Slice(4, keyLen).ToArray();
-        byte[] material;
-        using (var rsa = CreateRsa())
-        {
-            rsa.ImportParameters(new RSAParameters
-            {
-                Modulus = privateKey.Modulus,
-                Exponent = privateKey.Exponent,
-                D = privateKey.D,
-                P = privateKey.P,
-                Q = privateKey.Q,
-                DP = privateKey.DP,
-                DQ = privateKey.DQ,
-                InverseQ = privateKey.InverseQ
-            });
-            material = rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA256);
-        }
+        var material = IdentitySealedBox.Open(privateKey, wrapped);
 
         if (material.Length != SessionIdBytes + AesKeyBytes)
             throw new CryptographicException("Invalid unwrapped session key.");
@@ -395,16 +347,4 @@ public static class MessengerServerPayloadCodec
 #endif
     }
 
-    /// <summary>
-    /// net472 <see cref="RSA.Create()"/> returns <c>RSACryptoServiceProvider</c>, which rejects
-    /// <see cref="RSAEncryptionPadding.OaepSHA256"/>. Use CNG so server envelopes match net10.
-    /// </summary>
-    private static RSA CreateRsa()
-    {
-#if NETFRAMEWORK
-        return new RSACng();
-#else
-        return RSA.Create();
-#endif
-    }
 }

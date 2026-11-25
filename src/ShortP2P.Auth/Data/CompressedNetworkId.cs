@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using ShortP2P.Crypto;
 
 namespace ShortP2P.Auth.Data;
 
@@ -15,6 +16,7 @@ public readonly struct CompressedNetworkId : IEquatable<CompressedNetworkId>, IC
 
     public static CompressedNetworkId Empty => default;
 
+    /// <summary>Random id (tests only). Prefer <see cref="FromIdentityPublicKey"/>.</summary>
     public static CompressedNetworkId New()
     {
         Span<byte> buf = stackalloc byte[WireLength];
@@ -27,6 +29,17 @@ public readonly struct CompressedNetworkId : IEquatable<CompressedNetworkId>, IC
         tmp.CopyTo(buf);
 #endif
         return FromWireBytes(buf);
+    }
+
+    /// <summary>V2 NetworkId: first 12 bytes of SHA-256(Ed25519 public key).</summary>
+    public static CompressedNetworkId FromIdentityPublicKey(IdentityPublicKey publicKey) =>
+        FromWireBytes(IdentityKeyDerivation.NetworkIdWireFromPublicKey(publicKey));
+
+    public bool MatchesIdentityPublicKey(IdentityPublicKey publicKey)
+    {
+        Span<byte> wire = stackalloc byte[WireLength];
+        return TryWriteBytes(wire) &&
+               IdentityKeyDerivation.NetworkIdMatchesPublicKey(wire, publicKey);
     }
 
     public static CompressedNetworkId FromWireBytes(ReadOnlySpan<byte> bytes)

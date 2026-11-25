@@ -161,7 +161,7 @@ public sealed class ProfileBackupService(IUserAuthRepository users, IMessengerSe
         {
             Manifest = new ProfileBackupManifest
             {
-                SchemaVersion = 1,
+                SchemaVersion = 2,
                 ExportedUtcTicks = DateTime.UtcNow.Ticks,
                 App = "TorgLink",
                 Sections = ["user", "servers"]

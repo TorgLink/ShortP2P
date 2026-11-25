@@ -26,7 +26,7 @@ using ShortP2P.Transport.Abstractions;
 namespace ShortP2P.Client.Services;
 
 /// <summary>
-///     Чат: UDP/Bluetooth, RSA-handshake (0x01) только у пира с меньшим network id (сравнение Guid);
+///     Чат: UDP/Bluetooth, identity handshake (0x01) только у пира с меньшим network id (сравнение Guid);
 ///     второй шлёт запрос 0x04+16 байт id и ждёт handshake. Шифрокадры 0x02.
 ///     Leader и follower обмениваются сообщениями; BLE ConnectGatt — только у узла с большим MAC
 ///     (ответы — через GATT notify на уже открытой сессии, см. Bluetooth-транспорт).
@@ -84,13 +84,13 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private DateTimeOffset _lastInviteResyncUtc = DateTimeOffset.MinValue;
     private TaskCompletionSource<bool>? _followerHandshakeTcs;
 
-    /// <summary>True только у лидера (меньший NetworkId): отправлен свой RSA-handshake; test_send только с лидера.</summary>
+    /// <summary>True только у лидера (меньший NetworkId): отправлен свой identity handshake; test_send только с лидера.</summary>
     private bool _handshakeWeInitiated;
 
-    /// <summary>Leader: last TX 0x01 frame (129 bytes). Resent on duplicate 0x04 without rotating AES keys.</summary>
+    /// <summary>Leader: last TX 0x01 frame (1 + handshake body). Resent on duplicate 0x04 without rotating AES keys.</summary>
     private byte[]? _lastLeaderHandshakeFrame;
 
-    /// <summary>Follower: last accepted 0x01 payload (128 bytes) so identical LoRa resends don't rebuild the session.</summary>
+    /// <summary>Follower: last accepted 0x01 payload (handshake body) so identical LoRa resends don't rebuild the session.</summary>
     private byte[]? _lastAcceptedHandshakePayload;
 
     /// <summary>Inbound cipher held while local messenger/session is not ready (LoRa chunk trains often outrun handshake).</summary>
@@ -107,7 +107,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
 
     private TransportAddress? _peerAddress;
     private List<TransportAddress> _peerEndpoints = [];
-    private RsaPublicKey? _peerPublicKey;
+    private IdentityPublicKey? _peerPublicKey;
     private volatile bool _presenceHooked;
     private bool _startFinished;
     private bool _startInProgress;
@@ -179,7 +179,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             localNetworkScanner, chatMediaOptions, cryptoSessionCache, logger);
     }
 
-    /// <summary>Меньший NetworkId — единственный, кто высылает RSA-handshake / test_send; больший — только 0x04 и test_response.</summary>
+    /// <summary>Меньший NetworkId — единственный, кто высылает identity handshake / test_send; больший — только 0x04 и test_response.</summary>
     private bool IsCryptoSessionLeader() =>
         CryptoSessionLeadership.IsLeader(_user.NetworkIdShort, _chat.PeerNetworkIdShort);
 
@@ -502,7 +502,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         {
             _peerPublicKey = string.IsNullOrWhiteSpace(_chat.PeerRsaPublicJson)
                 ? null
-                : RsaKeySerializer.DeserializePublic(_chat.PeerRsaPublicJson);
+                : IdentityKeySerializer.DeserializePublic(_chat.PeerRsaPublicJson);
         }
         catch (Exception ex)
         {
@@ -954,7 +954,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             {
                 case HandshakeKind.Handshake:
                     _logger.LogInformation(
-                        "Chat {ChatId}: processing RSA handshake (0x01) from {Remote}",
+                        "Chat {ChatId}: processing identity handshake (0x01) from {Remote}",
                         _chat.Id, FormatTransportAddress(msg.RemoteAddress));
                     await ProcessHandshakePacketAsync(msg.Body, msg.RemoteAddress, cancellationToken)
                         .ConfigureAwait(false);
@@ -1543,7 +1543,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         var host = BuildInviteHosts();
         var nid = CompressedNetworkId.FromShortString(_user.NetworkIdShort);
         var invite = ChatInviteCodec.Build(_user.Nickname, nid,
-            RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey()), host, ChatInviteCodec.InviteUdpPort);
+            IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey()), host, ChatInviteCodec.InviteUdpPort);
         await SendInviteRouteRawAsync(invite, cancellationToken).ConfigureAwait(false);
         await SendSessionNegotiationAfterInviteAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -3307,10 +3307,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private async Task ProcessHandshakePacketAsync(ReadOnlyMemory<byte> body, TransportAddress remoteAddress,
         CancellationToken cancellationToken)
     {
-        if (body.Length != 128)
+        if (body.Length != P2PHandshake.HandshakePacketBytes)
         {
             _logger.LogWarning(
-                "Chat {ChatId}: ignored RSA handshake from {Remote}, invalid body length {Length}",
+                "Chat {ChatId}: ignored identity handshake from {Remote}, invalid body length {Length}",
                 _chat.Id, FormatTransportAddress(remoteAddress), body.Length);
             return;
         }
@@ -3352,7 +3352,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         // Reply on the same path the nudge arrived on (e.g. LoRa when UDP is dead).
         PreferEndpoint(remoteAddress);
         _logger.LogInformation(
-            "Chat {ChatId}: accepted session setup request from {Remote}, sending RSA handshake",
+            "Chat {ChatId}: accepted session setup request from {Remote}, sending identity handshake",
             _chat.Id, FormatTransportAddress(remoteAddress));
         await EnsureLeaderCryptoSessionCoreAsync(cancellationToken, true)
             .ConfigureAwait(false);
@@ -3817,7 +3817,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     packetToSend = cached;
                     resendCachedOnly = true;
                     _logger.LogInformation(
-                        "Chat {ChatId}: leader re-sending cached RSA handshake (0x01) without rotating keys, role={Role}",
+                        "Chat {ChatId}: leader re-sending cached identity handshake (0x01) without rotating keys, role={Role}",
                         _chat.Id, SessionRoleLabel());
                 }
             }
@@ -3832,7 +3832,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                 }
 
                 var hs = P2PCrypto.CreateHandshakeInitiation(_peerPublicKey);
-                var packet = new byte[129];
+                var packet = new byte[1 + P2PHandshake.HandshakePacketBytes];
                 packet[0] = FrameHandshake;
                 Buffer.BlockCopy(hs.HandshakePacket, 0, packet, 1, hs.HandshakePacket.Length);
 
@@ -3868,7 +3868,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         else
                         {
                             _logger.LogInformation(
-                                "Chat {ChatId}: leader sending RSA handshake (0x01), crypto role={Role}, BLE role={BleRole}, force={ForceSendHandshake}",
+                                "Chat {ChatId}: leader sending identity handshake (0x01), crypto role={Role}, BLE role={BleRole}, force={ForceSendHandshake}",
                                 _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a", forceSendHandshake);
                             _ = _cryptoSessionCache.GetSession(_chat.Id, () => hs.Session);
                             _lastLeaderHandshakeFrame = packet;
@@ -3980,7 +3980,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         //
         // try
         // {
-        //     _logger.LogDebug("Chat {ChatId}: follower waiting for RSA handshake (timeout 60s)", _chat.Id);
+        //     _logger.LogDebug("Chat {ChatId}: follower waiting for identity handshake (timeout 60s)", _chat.Id);
         //     await waitHandshake.Task.WaitAsync(TimeSpan.FromSeconds(60), cancellationToken).ConfigureAwait(false);
         //     _logger.LogInformation("Chat {ChatId}: follower session setup completed", _chat.Id);
         // }
@@ -4037,7 +4037,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
     private async Task HandleResponderHandshakeAsync(byte[] handshakePacket, CancellationToken cancellationToken)
     {
         _logger.LogInformation(
-            "Chat {ChatId}: processing RSA handshake packet (crypto role={Role}, BLE role={BleRole})",
+            "Chat {ChatId}: processing identity handshake packet (crypto role={Role}, BLE role={BleRole})",
             _chat.Id, SessionRoleLabel(), BleSessionRoleLabel() ?? "n/a");
 
         MessengerService? created = null;
@@ -4046,7 +4046,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
         {
             if (IsCryptoSessionLeader())
             {
-                _logger.LogDebug("Chat {ChatId}: ignored RSA handshake on leader side", _chat.Id);
+                _logger.LogDebug("Chat {ChatId}: ignored identity handshake on leader side", _chat.Id);
                 return;
             }
 
@@ -4058,7 +4058,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     && IsFollowerCryptoReadyCore())
                 {
                     _logger.LogDebug(
-                        "Chat {ChatId}: ignoring identical RSA handshake resend; follower already ready",
+                        "Chat {ChatId}: ignoring identical identity handshake resend; follower already ready",
                         _chat.Id);
                     SignalFollowerHandshakeSuccess();
                     return;

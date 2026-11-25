@@ -88,7 +88,7 @@ public static class LanChatStartFromDiscovery
             TimeSpan.FromSeconds(10));
         var nid = CompressedNetworkId.FromShortString(user.NetworkIdShort);
         var invite = ChatInviteCodec.Build(user.Nickname, nid,
-            RsaKeySerializer.SerializePublic(auth.GetCurrentPublicKey()), host, ChatInviteCodec.InviteUdpPort);
+            IdentityKeySerializer.SerializePublic(auth.GetCurrentPublicKey()), host, ChatInviteCodec.InviteUdpPort);
 
         if (hostTransport != null)
         {

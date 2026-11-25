@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 namespace ShortP2P.Crypto;
 
 /// <summary>
-/// Deterministic 4-emoji safety number from an RSA public key (SHA-256 of modulus||exponent).
+/// Deterministic 4-emoji safety number from an identity public key (SHA-256 of Ed25519||X25519).
 /// </summary>
 public static class SafetyNumber
 {
@@ -12,10 +12,14 @@ public static class SafetyNumber
     /// <summary>256 distinct pictographs (U+1F400–U+1F4FF), indexed by a hash byte.</summary>
     public static readonly string[] Glyphs = BuildGlyphs();
 
-    public static string FromPublicKey(RsaPublicKey key)
+    public static string FromPublicKey(IdentityPublicKey key)
     {
         Require.NotNull(key);
-        var hash = Sha256(Concat(key.Modulus, key.Exponent));
+#if NETFRAMEWORK
+        var hash = NetFrameworkCrypto.Sha256(CryptoPrimitives.Concat(key.Ed25519Public, key.X25519Public));
+#else
+        var hash = SHA256.HashData(CryptoPrimitives.Concat(key.Ed25519Public, key.X25519Public));
+#endif
         return $"{Glyphs[hash[0]]}{Glyphs[hash[1]]}{Glyphs[hash[2]]}{Glyphs[hash[3]]}";
     }
 
@@ -26,7 +30,7 @@ public static class SafetyNumber
             return false;
         try
         {
-            emojis = FromPublicKey(RsaKeySerializer.DeserializePublic(json));
+            emojis = FromPublicKey(IdentityKeySerializer.DeserializePublic(json));
             return emojis.Length > 0;
         }
         catch
@@ -41,46 +45,8 @@ public static class SafetyNumber
     public static string FormatPair(string myNick, string myEmojis, string peerNick, string peerEmojis) =>
         $"{(myNick ?? "").Trim()}: {myEmojis}, {(peerNick ?? "").Trim()}: {peerEmojis}";
 
-    public static bool PublicKeyJsonEquals(string? a, string? b)
-    {
-        if (a is null || b is null)
-            return string.IsNullOrWhiteSpace(a) && string.IsNullOrWhiteSpace(b);
-        if (string.IsNullOrWhiteSpace(a) && string.IsNullOrWhiteSpace(b))
-            return true;
-        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
-            return false;
-        if (string.Equals(a.Trim(), b.Trim(), StringComparison.Ordinal))
-            return true;
-        try
-        {
-            var ka = RsaKeySerializer.DeserializePublic(a);
-            var kb = RsaKeySerializer.DeserializePublic(b);
-            return ka.Modulus.AsSpan().SequenceEqual(kb.Modulus) &&
-                   ka.Exponent.AsSpan().SequenceEqual(kb.Exponent);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static byte[] Sha256(byte[] data)
-    {
-#if NET5_0_OR_GREATER
-        return SHA256.HashData(data);
-#else
-        using var sha = SHA256.Create();
-        return sha.ComputeHash(data);
-#endif
-    }
-
-    private static byte[] Concat(byte[] a, byte[] b)
-    {
-        var r = new byte[a.Length + b.Length];
-        Buffer.BlockCopy(a, 0, r, 0, a.Length);
-        Buffer.BlockCopy(b, 0, r, a.Length, b.Length);
-        return r;
-    }
+    public static bool PublicKeyJsonEquals(string? a, string? b) =>
+        IdentityKeySerializer.PublicKeyJsonEquals(a, b);
 
     private static string[] BuildGlyphs()
     {

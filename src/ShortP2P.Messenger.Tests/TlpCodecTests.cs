@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Formats.Cbor;
 using System.Security.Cryptography;
+using ShortP2P.Auth.Data;
 using ShortP2P.Client.ProfileBackup;
 using ShortP2P.Crypto;
 
@@ -25,7 +26,7 @@ public class TlpCodecTests
 
         var u = restored.User;
         Assert.Equal("alice", u.Nickname);
-        Assert.Equal("ABCD1234", u.NetworkIdShort);
+        Assert.Equal(doc.User.NetworkIdShort, u.NetworkIdShort);
         Assert.Equal("pbkdf2-sha256", u.Password.Alg);
         Assert.Equal(PasswordHasher.Iterations, u.Password.Iterations);
         Assert.Equal(doc.User.Password.Salt, u.Password.Salt);
@@ -45,7 +46,7 @@ public class TlpCodecTests
         Assert.True(a.Active);
         Assert.True(a.IsRegistered);
         Assert.Equal("srvpw-a", a.AccountPassword);
-        Assert.Equal("ABCD1234", a.NetworkId);
+        Assert.Equal(doc.User.NetworkIdShort, a.NetworkId);
         Assert.Equal("alice", a.Nick);
         Assert.Equal(111, a.CreatedUtcTicks);
         Assert.Equal(222, a.UpdatedUtcTicks);
@@ -156,12 +157,17 @@ public class TlpCodecTests
         Assert.Contains("trusted", ex.Message);
     }
 
-    private static ProfileBackupDocument SampleDocument() =>
-        new()
+    private static ProfileBackupDocument SampleDocument()
+    {
+        var keys = P2PCrypto.GenerateKeyPair();
+        var networkId = CompressedNetworkId.FromIdentityPublicKey(keys.PublicKey).ToShortString();
+        var pub = IdentityKeySerializer.SerializePublic(keys.PublicKey);
+        var priv = IdentityKeySerializer.SerializePrivate(keys.PrivateKey);
+        return new ProfileBackupDocument
         {
             Manifest = new ProfileBackupManifest
             {
-                SchemaVersion = 1,
+                SchemaVersion = 2,
                 ExportedUtcTicks = 638000000000000000,
                 App = "TorgLink",
                 Sections = ["user", "servers"]
@@ -169,7 +175,7 @@ public class TlpCodecTests
             User = new ProfileBackupUser
             {
                 Nickname = "alice",
-                NetworkIdShort = "ABCD1234",
+                NetworkIdShort = networkId,
                 Password = new ProfileBackupPassword
                 {
                     Alg = "pbkdf2-sha256",
@@ -177,8 +183,8 @@ public class TlpCodecTests
                     Salt = RandomBytes(PasswordHasher.SaltSize),
                     Hash = RandomBytes(PasswordHasher.KeySize)
                 },
-                RsaPrivateJson = "{\"M\":\"m\",\"E\":\"e\",\"D\":\"d\"}",
-                RsaPublicJson = "{\"M\":\"m\",\"E\":\"e\"}",
+                RsaPrivateJson = priv,
+                RsaPublicJson = pub,
                 AboutMe = "hello",
                 Avatar = [1, 2, 3],
                 DataUdpPort = 17501
@@ -194,7 +200,7 @@ public class TlpCodecTests
                     Active = true,
                     IsRegistered = true,
                     AccountPassword = "srvpw-a",
-                    NetworkId = "ABCD1234",
+                    NetworkId = networkId,
                     Nick = "alice",
                     CreatedUtcTicks = 111,
                     UpdatedUtcTicks = 222
@@ -208,13 +214,14 @@ public class TlpCodecTests
                     Active = false,
                     IsRegistered = false,
                     AccountPassword = "srvpw-b",
-                    NetworkId = "ABCD1234",
+                    NetworkId = networkId,
                     Nick = "alice",
                     CreatedUtcTicks = 333,
                     UpdatedUtcTicks = 444
                 }
             ]
         };
+    }
 
     /// <summary>Returns a copy of <paramref name="doc"/> with a different login salt.</summary>
     private static ProfileBackupDocument WithUserSalt(ProfileBackupDocument doc, byte[] salt) =>
@@ -244,13 +251,18 @@ public class TlpCodecTests
     /// <summary>CBOR payload with a configurable login salt size and optional server trust keys.</summary>
     private static byte[] EncodeCustomCbor(int saltSize, bool includeServerTrustFields)
     {
+        var keys = P2PCrypto.GenerateKeyPair();
+        var networkId = CompressedNetworkId.FromIdentityPublicKey(keys.PublicKey).ToShortString();
+        var pub = IdentityKeySerializer.SerializePublic(keys.PublicKey);
+        var priv = IdentityKeySerializer.SerializePrivate(keys.PrivateKey);
+
         var writer = new CborWriter(CborConformanceMode.Strict);
         writer.WriteStartMap(3);
 
         writer.WriteTextString("manifest");
         writer.WriteStartMap(4);
         writer.WriteTextString("schema_version");
-        writer.WriteInt32(1);
+        writer.WriteInt32(2);
         writer.WriteTextString("exported_utc");
         writer.WriteInt64(638000000000000000);
         writer.WriteTextString("app");
@@ -267,7 +279,7 @@ public class TlpCodecTests
         writer.WriteTextString("nickname");
         writer.WriteTextString("alice");
         writer.WriteTextString("network_id_short");
-        writer.WriteTextString("ABCD1234");
+        writer.WriteTextString(networkId);
         writer.WriteTextString("password");
         writer.WriteStartMap(4);
         writer.WriteTextString("alg");
@@ -280,9 +292,9 @@ public class TlpCodecTests
         writer.WriteByteString(RandomBytes(PasswordHasher.KeySize));
         writer.WriteEndMap();
         writer.WriteTextString("rsa_private_json");
-        writer.WriteTextString("{}");
+        writer.WriteTextString(priv);
         writer.WriteTextString("rsa_public_json");
-        writer.WriteTextString("{}");
+        writer.WriteTextString(pub);
         writer.WriteTextString("about_me");
         writer.WriteTextString("");
         writer.WriteTextString("data_udp_port");

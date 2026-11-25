@@ -676,7 +676,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (user == null)
             return;
 
-        var publicKey = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        var publicKey = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         var target = targetNetworkId.Trim();
         if (string.IsNullOrEmpty(target) ||
             string.Equals(target, user.NetworkIdShort.Trim(), StringComparison.Ordinal))
@@ -700,7 +700,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (!_manager.AllowsTraffic(connection))
             return;
 
-        publicKey ??= RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        publicKey ??= IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         try
         {
             LogChatRequest("send", connection, targetNetworkId);
@@ -785,10 +785,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             return null;
         }
 
-        RsaPublicKey peerKey;
+        IdentityPublicKey peerKey;
         try
         {
-            peerKey = RsaKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
+            peerKey = IdentityKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
         }
         catch (Exception ex)
         {
@@ -984,10 +984,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             _logger.LogWarning(ex, "PublishChatRequest before bot send failed for chat {ChatId}", latest.Id);
         }
 
-        RsaPublicKey botKey;
+        IdentityPublicKey botKey;
         try
         {
-            botKey = RsaKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
+            botKey = IdentityKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
         }
         catch (Exception ex)
         {
@@ -1101,10 +1101,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(chat.PeerRsaPublicJson))
             return false;
 
-        RsaPublicKey peerKey;
+        IdentityPublicKey peerKey;
         try
         {
-            peerKey = RsaKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
+            peerKey = IdentityKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
         }
         catch
         {
@@ -1177,10 +1177,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(chat.PeerRsaPublicJson))
             return null;
 
-        RsaPublicKey peerKey;
+        IdentityPublicKey peerKey;
         try
         {
-            peerKey = RsaKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
+            peerKey = IdentityKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
         }
         catch
         {
@@ -2417,7 +2417,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (requests.Count == 0)
             return;
 
-        var ourPublic = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        var ourPublic = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         foreach (var request in requests)
         {
             cancellationToken.ThrowIfCancellationRequested();

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using ShortP2P.Auth.Data;
 using ShortP2P.Client.Data;
@@ -12,6 +13,7 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
 {
     private readonly SemaphoreSlim _addChatGate = new(1, 1);
     private readonly AppDatabase _db = appDatabase ?? throw new global::System.ArgumentNullException(nameof(appDatabase));
+    private readonly ConcurrentDictionary<int, PendingPeerKeyChange> _pendingPeerKeyChanges = new();
     private int _seenPruneCounter;
 
     /// <summary>Список чатов на главном экране: обновить после входящего приглашения и т.п.</summary>
@@ -32,8 +34,11 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
     /// </summary>
     public event EventHandler<ChatCreatedEventArgs>? IncomingChatInvite;
 
-    /// <summary>Сохранённый публичный ключ пира заменён другим (возможный MITM).</summary>
+    /// <summary>Сохранённый публичный ключ пира заменён другим (после явного Accept).</summary>
     public event EventHandler<PeerPublicKeyChangedEventArgs>? PeerPublicKeyChanged;
+
+    /// <summary>Предложена смена ключа у уже закреплённого контакта — нужен диалог Accept/Reject.</summary>
+    public event EventHandler<PeerKeyChangeProposedEventArgs>? PeerKeyChangeProposed;
 
     public void NotifyChatListChanged() =>
         RaiseEvent(ChatListChanged, EventArgs.Empty);
@@ -543,8 +548,76 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
         return true;
     }
 
+    public async Task SetPendingPeerKeyChangeAsync(int chatId, string publicKeyJson, string? nickname, string? host,
+        PeerKeySource? keySource = null)
+    {
+        var trimmed = publicKeyJson?.Trim() ?? "";
+        if (trimmed.Length == 0)
+            return;
+
+        var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
+        var chat = await conn.FindAsync<ChatEntity>(chatId).ConfigureAwait(false);
+        if (chat == null)
+            return;
+
+        if (string.IsNullOrWhiteSpace(chat.PeerRsaPublicJson) ||
+            SafetyNumber.PublicKeyJsonEquals(chat.PeerRsaPublicJson, trimmed))
+        {
+            await UpdateChatP2pRouteAsync(chatId, host ?? chat.PeerHost, chat.PeerPort, chat.RelayRouteBlob, trimmed,
+                keySource, acceptKeyChange: true).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(nickname))
+                await TryUpdatePeerNicknameAsync(chatId, nickname).ConfigureAwait(false);
+            return;
+        }
+
+        _pendingPeerKeyChanges[chatId] = new PendingPeerKeyChange
+        {
+            PublicKeyJson = trimmed,
+            Nickname = nickname,
+            Host = host,
+            KeySource = keySource
+        };
+
+        // Keep reachability fresh even while the key is pending confirmation.
+        if (!string.IsNullOrWhiteSpace(host))
+        {
+            await UpdateChatP2pRouteAsync(chatId, host, chat.PeerPort, chat.RelayRouteBlob, peerRsaPublicJson: null,
+                keySource: null, acceptKeyChange: false).ConfigureAwait(false);
+        }
+
+        RaiseEvent(PeerKeyChangeProposed, new PeerKeyChangeProposedEventArgs
+        {
+            ChatId = chat.Id,
+            PeerNickname = chat.PeerNickname,
+            PeerNetworkIdShort = chat.PeerNetworkIdShort,
+            PreviousSafetyNumber = SafetyNumber.FromPublicKeyJsonOrEmpty(chat.PeerRsaPublicJson),
+            ProposedSafetyNumber = SafetyNumber.FromPublicKeyJsonOrEmpty(trimmed)
+        });
+    }
+
+    public async Task<bool> AcceptPendingPeerKeyChangeAsync(int chatId)
+    {
+        if (!_pendingPeerKeyChanges.TryRemove(chatId, out var pending))
+            return false;
+
+        var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
+        var chat = await conn.FindAsync<ChatEntity>(chatId).ConfigureAwait(false);
+        if (chat == null)
+            return false;
+
+        var host = string.IsNullOrWhiteSpace(pending.Host) ? chat.PeerHost : pending.Host!;
+        await UpdateChatP2pRouteAsync(chatId, host, chat.PeerPort, chat.RelayRouteBlob, pending.PublicKeyJson,
+            pending.KeySource, acceptKeyChange: true).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(pending.Nickname))
+            await TryUpdatePeerNicknameAsync(chatId, pending.Nickname).ConfigureAwait(false);
+        return true;
+    }
+
+    public void RejectPendingPeerKeyChange(int chatId) =>
+        _pendingPeerKeyChanges.TryRemove(chatId, out _);
+
     public async Task UpdateChatP2pRouteAsync(int chatId, string peerHost, int peerPort, string? relayRouteBlob,
-        string? peerRsaPublicJson = null, PeerKeySource? keySource = null)
+        string? peerRsaPublicJson = null, PeerKeySource? keySource = null, bool acceptKeyChange = false)
     {
         var conn = await _db.GetConnectionAsync();
         var chat = await conn.FindAsync<ChatEntity>(chatId);
@@ -562,6 +635,15 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
             {
                 var previous = chat.PeerRsaPublicJson;
                 var pubChanged = !SafetyNumber.PublicKeyJsonEquals(previous, trimmed);
+                if (pubChanged && !string.IsNullOrWhiteSpace(previous) && !acceptKeyChange)
+                {
+                    await SetPendingPeerKeyChangeAsync(chatId, trimmed, nickname: null, host: peerHost, keySource)
+                        .ConfigureAwait(false);
+                    chat.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
+                    await conn.UpdateAsync(chat);
+                    return;
+                }
+
                 chat.PeerRsaPublicJson = trimmed;
                 if (keySource.HasValue &&
                     (pubChanged || string.IsNullOrWhiteSpace(chat.PeerKeySourceKind)))
@@ -1370,7 +1452,30 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
 
         await conn.ExecuteAsync("DELETE FROM messages WHERE ChatId = ?", chatId).ConfigureAwait(false);
         await conn.DeleteAsync(chat).ConfigureAwait(false);
+        _pendingPeerKeyChanges.TryRemove(chatId, out _);
         NotifyChatListChanged();
         return true;
+    }
+
+    /// <summary>
+    ///     SHO-33: wipe all chats and messages for a user after identity migration (NetworkId changed).
+    /// </summary>
+    public async Task<int> DeleteAllChatsForUserAsync(int userId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
+        var chats = await conn.Table<ChatEntity>().Where(c => c.UserId == userId).ToListAsync()
+            .ConfigureAwait(false);
+        foreach (var chat in chats)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await conn.ExecuteAsync("DELETE FROM messages WHERE ChatId = ?", chat.Id).ConfigureAwait(false);
+            await conn.DeleteAsync(chat).ConfigureAwait(false);
+            _pendingPeerKeyChanges.TryRemove(chat.Id, out _);
+        }
+
+        if (chats.Count > 0)
+            NotifyChatListChanged();
+        return chats.Count;
     }
 }

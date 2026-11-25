@@ -302,7 +302,7 @@ public sealed class ProfileBackupServiceTests : IDisposable
     private static async Task<UserEntity> InsertLegacySaltUserAsync(
         IUserAuthRepository users,
         string nickname,
-        string networkIdShort)
+        string _networkIdShort)
     {
         var salt16 = RandomNumberGenerator.GetBytes(16);
         var hash = Rfc2898DeriveBytes.Pbkdf2(Logopass, salt16, PasswordHasher.Iterations,
@@ -311,11 +311,11 @@ public sealed class ProfileBackupServiceTests : IDisposable
         var legacy = new UserEntity
         {
             Nickname = nickname,
-            NetworkIdShort = networkIdShort,
+            NetworkIdShort = CompressedNetworkId.FromIdentityPublicKey(keys.PublicKey).ToShortString(),
             PasswordSaltBase64 = Convert.ToBase64String(salt16),
             PasswordHashBase64 = Convert.ToBase64String(hash),
-            RsaPrivateJson = RsaKeySerializer.SerializePrivate(keys.PrivateKey),
-            RsaPublicJson = RsaKeySerializer.SerializePublic(keys.PublicKey),
+            RsaPrivateJson = IdentityKeySerializer.SerializePrivate(keys.PrivateKey),
+            RsaPublicJson = IdentityKeySerializer.SerializePublic(keys.PublicKey),
             DataUdpPort = 17500,
             CreatedUtcTicks = DateTime.UtcNow.Ticks
         };
