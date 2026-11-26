@@ -21,8 +21,26 @@ public static class MlKemCrypto
     /// <summary>Always true: managed Bouncy Castle ML-KEM does not depend on OS PQC support.</summary>
     public static bool IsSupported => true;
 
+    private static volatile bool _featureEnabled = true;
+
+    /// <summary>
+    ///     User/settings gate for the experimental ML-KEM path (default on).
+    ///     Synced from <c>P2pRoutingSettings.EnableMlKem</c>.
+    /// </summary>
+    public static bool IsFeatureEnabled => _featureEnabled;
+
+    /// <summary>Enable or disable ML-KEM crypto operations from client settings.</summary>
+    public static void SetFeatureEnabled(bool enabled) => _featureEnabled = enabled;
+
+    private static void EnsureFeatureEnabled()
+    {
+        if (!_featureEnabled)
+            throw new InvalidOperationException("ML-KEM is disabled in settings.");
+    }
+
     public static MlKemKeyPair GenerateKeyPair(MlKemParameterSet parameterSet = MlKemParameterSet.MlKem768)
     {
+        EnsureFeatureEnabled();
         var bcParams = ToBcParameters(parameterSet);
         var random = new SecureRandom();
         var generator = new MLKemKeyPairGenerator();
@@ -39,6 +57,7 @@ public static class MlKemCrypto
 
     public static MlKemPublicKey ImportPublicKey(MlKemParameterSet parameterSet, byte[] encoded)
     {
+        EnsureFeatureEnabled();
         Require.NotNull(encoded);
         var bcParams = ToBcParameters(parameterSet);
         var expected = PublicKeyByteLength(parameterSet);
@@ -58,6 +77,7 @@ public static class MlKemCrypto
 
     public static MlKemPrivateKey ImportPrivateKey(MlKemParameterSet parameterSet, byte[] encoded)
     {
+        EnsureFeatureEnabled();
         Require.NotNull(encoded);
         var bcParams = ToBcParameters(parameterSet);
         var expected = PrivateKeyByteLength(parameterSet);
@@ -80,6 +100,7 @@ public static class MlKemCrypto
     /// </summary>
     public static MlKemEncapsulationResult Encapsulate(MlKemPublicKey remotePublicKey)
     {
+        EnsureFeatureEnabled();
         Require.NotNull(remotePublicKey);
         var bcParams = ToBcParameters(remotePublicKey.ParameterSet);
         var publicKey = MLKemPublicKeyParameters.FromEncoding(bcParams, remotePublicKey.Encoded);
@@ -99,6 +120,7 @@ public static class MlKemCrypto
     /// <summary>Decapsulate <paramref name="ciphertext"/> with the local private key.</summary>
     public static byte[] Decapsulate(MlKemPrivateKey localPrivateKey, byte[] ciphertext)
     {
+        EnsureFeatureEnabled();
         Require.NotNull(localPrivateKey);
         Require.NotNull(ciphertext);
 

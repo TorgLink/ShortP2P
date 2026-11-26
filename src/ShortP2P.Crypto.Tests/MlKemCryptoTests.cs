@@ -204,4 +204,24 @@ public class MlKemCryptoTests
         Assert.Equal(a.SharedSecret, MlKemCrypto.Decapsulate(keys.PrivateKey, a.Ciphertext));
         Assert.Equal(b.SharedSecret, MlKemCrypto.Decapsulate(keys.PrivateKey, b.Ciphertext));
     }
+
+    [Fact]
+    public void SetFeatureEnabled_False_ShouldBlockCryptoOperations()
+    {
+        MlKemCrypto.SetFeatureEnabled(true);
+        var keys = MlKemCrypto.GenerateKeyPair(MlKemParameterSet.MlKem768);
+        try
+        {
+            MlKemCrypto.SetFeatureEnabled(false);
+            Assert.False(MlKemCrypto.IsFeatureEnabled);
+            Assert.Throws<InvalidOperationException>(() => MlKemCrypto.GenerateKeyPair());
+            Assert.Throws<InvalidOperationException>(() => MlKemCrypto.Encapsulate(keys.PublicKey));
+            Assert.Throws<InvalidOperationException>(() =>
+                MlKemCrypto.Decapsulate(keys.PrivateKey, new byte[1088]));
+        }
+        finally
+        {
+            MlKemCrypto.SetFeatureEnabled(true);
+        }
+    }
 }

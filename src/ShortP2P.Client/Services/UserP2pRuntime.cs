@@ -919,6 +919,8 @@ public sealed class UserP2pRuntime : IAsyncDisposable
         Settings.TrafficQuality = persisted.TrafficQuality;
         Settings.AdvertisedPeerCapabilities = persisted.AdvertisedPeerCapabilities | PresencePeerCapabilities.Chat;
         Settings.VisibleForSearch = persisted.VisibleForSearch;
+        Settings.EnableMlKem = persisted.EnableMlKem;
+        ShortP2P.Crypto.MlKemCrypto.SetFeatureEnabled(Settings.EnableMlKem);
         if (MessengerServers != null)
             MessengerServers.Manager.VisibleForSearch = Settings.VisibleForSearch;
         _bluetooth?.SetLocalNetworkId(CompressedNetworkId.FromShortString(user.NetworkIdShort));
