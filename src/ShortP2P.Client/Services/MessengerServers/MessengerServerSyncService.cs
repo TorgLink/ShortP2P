@@ -676,7 +676,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (user == null)
             return;
 
-        var publicKey = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        var publicKey = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         var target = targetNetworkId.Trim();
         if (string.IsNullOrEmpty(target) ||
             string.Equals(target, user.NetworkIdShort.Trim(), StringComparison.Ordinal))
@@ -700,7 +700,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (!_manager.AllowsTraffic(connection))
             return;
 
-        publicKey ??= RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        publicKey ??= IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         try
         {
             LogChatRequest("send", connection, targetNetworkId);
@@ -785,10 +785,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             return null;
         }
 
-        RsaPublicKey peerKey;
+        IdentityPublicKey peerKey;
         try
         {
-            peerKey = RsaKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
+            peerKey = IdentityKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
         }
         catch (Exception ex)
         {
@@ -984,10 +984,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             _logger.LogWarning(ex, "PublishChatRequest before bot send failed for chat {ChatId}", latest.Id);
         }
 
-        RsaPublicKey botKey;
+        IdentityPublicKey botKey;
         try
         {
-            botKey = RsaKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
+            botKey = IdentityKeySerializer.DeserializePublic(latest.PeerRsaPublicJson);
         }
         catch (Exception ex)
         {
@@ -1101,10 +1101,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(chat.PeerRsaPublicJson))
             return false;
 
-        RsaPublicKey peerKey;
+        IdentityPublicKey peerKey;
         try
         {
-            peerKey = RsaKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
+            peerKey = IdentityKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
         }
         catch
         {
@@ -1177,10 +1177,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(chat.PeerRsaPublicJson))
             return null;
 
-        RsaPublicKey peerKey;
+        IdentityPublicKey peerKey;
         try
         {
-            peerKey = RsaKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
+            peerKey = IdentityKeySerializer.DeserializePublic(chat.PeerRsaPublicJson);
         }
         catch
         {
@@ -2417,7 +2417,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
         if (requests.Count == 0)
             return;
 
-        var ourPublic = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        var ourPublic = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         foreach (var request in requests)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2595,6 +2595,19 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                 }
             }
 
+            if (opened.IsRekeyNotice)
+            {
+                try
+                {
+                    await HandleServerCipherRekeyAsync(user, peerId, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Server cipher re-key handling failed for peer {PeerId}", peerId);
+                }
+            }
+
+            var contentAccepted = false;
             var wire = opened.ChatWire;
             if (wire != null)
             {
@@ -2608,9 +2621,9 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                         "Skipping server message {MessageId}: no local chat for peer {PeerId}",
                         message.MessageId,
                         peerId);
-                    continue;
                 }
-
+                else
+                {
                 var blocked = await _chats.IsPeerBlockedAsync(user.Id, peerId, cancellationToken)
                     .ConfigureAwait(false);
 
@@ -2621,6 +2634,7 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                         "Duplicate server message {MessageId} from {BaseUrl} — skip ingest, still ack",
                         message.MessageId,
                         connection.Entity.BaseUrl);
+                    contentAccepted = true;
                 }
                 else
                 {
@@ -2630,6 +2644,8 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                     _logger.LogDebug(
                         "Persisted server message {MessageId} chat={ChatId} IsBot={IsBot} wireLen={WireLen}",
                         message.MessageId, chat.Id, chat.IsBot, wire.Length);
+                    contentAccepted = true;
+                }
                 }
             }
             finally
@@ -2638,14 +2654,16 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             }
             }
 
-            // Ack on every server that delivered a copy, even if we already displayed it once.
+            // Notify the sender only when chat content was accepted. Control-only frames
+            // (unknown session → re-key, probe ack) discard the inbox copy without a ticket.
             try
             {
                 await TrackAsync(connection, () => connection.Api.SubmitDeliveryReceiptAsync(
                     new DeliveryReceiptRequest
                     {
                         MessageId = message.MessageId,
-                        ReceivedAtUtc = DateTime.UtcNow
+                        ReceivedAtUtc = DateTime.UtcNow,
+                        NotifySender = contentAccepted
                     },
                     cancellationToken)).ConfigureAwait(false);
             }
@@ -2653,6 +2671,33 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             {
                 _logger.LogError(ex, "Delivery receipt failed for {MessageId}", message.MessageId);
             }
+        }
+    }
+
+    private async Task HandleServerCipherRekeyAsync(
+        UserEntity user,
+        string peerId,
+        CancellationToken cancellationToken)
+    {
+        var chat = await _chats.FindChatByPeerNetworkIdAsync(user.Id, peerId).ConfigureAwait(false);
+        if (chat == null)
+        {
+            _logger.LogDebug("Server cipher re-key: no local chat for peer {PeerId}", peerId);
+            return;
+        }
+
+        if (_sessions.TryGetSession(chat.Id, out var session) && session != null)
+        {
+            await session.OnServerCipherRekeyAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var ids = await _chats.RequeueSentOutgoingAsPendingAsync(chat.Id).ConfigureAwait(false);
+        if (ids.Count > 0)
+        {
+            _logger.LogInformation(
+                "Server cipher re-key: requeued {Count} Sent message(s) as Pending for chat {ChatId} (session not started)",
+                ids.Count, chat.Id);
         }
     }
 

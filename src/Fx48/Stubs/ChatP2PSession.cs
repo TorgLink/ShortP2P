@@ -198,7 +198,7 @@ public sealed class ChatP2PSession
         byte[] wire;
         try
         {
-            var privateKey = RsaKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
+            var privateKey = IdentityKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
             var opened = MessengerServerPayloadCodec.Open(
                 ciphertext, privateKey, _chat.PeerNetworkIdShort, ServerCipherSessionStore.Shared);
             if (opened.ChatWire == null)
@@ -331,6 +331,26 @@ public sealed class ChatP2PSession
     /// UI refresh when delivery status changes outside this session (e.g. server delivery receipt).
     /// </summary>
     public void NotifyMessagesChangedFromExternal() => RaiseMessagesChanged();
+
+    /// <summary>
+    /// Peer asked for a messenger-server cipher re-key: return outstanding Sent rows to Pending and flush.
+    /// </summary>
+    public async Task OnServerCipherRekeyAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var ids = await _repo.RequeueSentOutgoingAsPendingAsync(_chat.Id).ConfigureAwait(false);
+        if (ids.Count == 0)
+            return;
+
+        _logger?.LogInformation(
+            "Chat {ChatId}: server cipher re-key — requeued {Count} Sent message(s) as Pending",
+            _chat.Id, ids.Count);
+
+        foreach (var id in ids)
+            QueueOutgoingDelivery(id);
+
+        RaiseMessagesChanged();
+    }
 
     public Task IngestIncomingWireFromServerAsync(
         byte[] wire,

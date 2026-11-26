@@ -35,7 +35,7 @@ public class SafetyNumberTests
     public void FromPublicKeyJson_IgnoresJsonWhitespace()
     {
         var kp = P2PCrypto.GenerateKeyPair();
-        var json = RsaKeySerializer.SerializePublic(kp.PublicKey);
+        var json = IdentityKeySerializer.SerializePublic(kp.PublicKey);
         Assert.True(SafetyNumber.TryFromPublicKeyJson(json, out var emojis));
         Assert.Equal(emojis, SafetyNumber.FromPublicKey(kp.PublicKey));
         Assert.True(SafetyNumber.PublicKeyJsonEquals(json, " " + json + " "));

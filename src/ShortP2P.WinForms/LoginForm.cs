@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ShortP2P.Auth;
 using ShortP2P.Client.ProfileBackup;
+using ShortP2P.Client.Services;
 
 namespace ShortP2P.WinForms;
 
@@ -16,7 +17,7 @@ public sealed class LoginForm : Form
     private readonly TextBox _nick = new() { PlaceholderText = "Nickname" };
     private readonly TextBox _pass = new() { PlaceholderText = "Password", UseSystemPasswordChar = true };
     private readonly IServiceProvider _services;
-    private readonly ILogger<UserAction> _userActions;
+    private readonly ILogger<UserAction> _userLogs;
 
     public LoginForm(AuthService auth, IServiceProvider services, ILogger<LoginForm> logger,
         ILogger<UserAction> userActions)
@@ -24,7 +25,7 @@ public sealed class LoginForm : Form
         _auth = auth;
         _services = services;
         _logger = logger;
-        _userActions = userActions;
+        _userLogs = userActions;
         Text = "ShortP2P — Login";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -78,7 +79,7 @@ public sealed class LoginForm : Form
         FormClosing += (_, e) =>
         {
             if (e.CloseReason == CloseReason.UserClosing && DialogResult == DialogResult.Cancel)
-                _userActions.LogInformation("Login: exit");
+                _userLogs.LogInformation("Login: exit");
         };
     }
 
@@ -86,7 +87,8 @@ public sealed class LoginForm : Form
     {
         if (await _auth.TryRestoreSessionAsync().ConfigureAwait(true) && _auth.CurrentUser != null)
         {
-            _userActions.LogInformation("Login: session restored for {Nickname}", _auth.CurrentUser.Nickname);
+            await ApplyIdentityMigrationIfNeededAsync().ConfigureAwait(true);
+            _userLogs.LogInformation("Login: session restored for {Nickname}", _auth.CurrentUser.Nickname);
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -99,20 +101,37 @@ public sealed class LoginForm : Form
         var (ok, err) = await _auth.LoginAsync(nick, pass).ConfigureAwait(true);
         if (!ok)
         {
-            _userActions.LogInformation("Login: failed for nickname {Nickname}", nick);
+            _userLogs.LogInformation("Login: failed for nickname {Nickname}", nick);
             _logger.LogWarning("Login failed for {Nickname}: {Reason}", nick, err);
             MessageBox.Show(this, err ?? "Login failed.", "Login", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        _userActions.LogInformation("Login: success for nickname {Nickname}", nick);
+        await ApplyIdentityMigrationIfNeededAsync().ConfigureAwait(true);
+        _userLogs.LogInformation("Login: success for nickname {Nickname}", nick);
         DialogResult = DialogResult.OK;
         Close();
     }
 
+    private async Task ApplyIdentityMigrationIfNeededAsync()
+    {
+        try
+        {
+            var chats = _services.GetRequiredService<ChatRepository>();
+            var migration = await IdentityMigrationApplier.ApplyPendingAsync(_auth, chats, _logger)
+                .ConfigureAwait(true);
+            if (migration != null)
+                MessageBox.Show(this, migration, "Identity upgraded", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Identity migration after login");
+        }
+    }
+
     private void OnRegisterClicked(object? sender, EventArgs e)
     {
-        _userActions.LogInformation("Login: open register");
+        _userLogs.LogInformation("Login: open register");
         using var reg = _services.GetRequiredService<RegisterForm>();
         if (reg.ShowDialog(this) != DialogResult.OK)
             return;
@@ -122,7 +141,7 @@ public sealed class LoginForm : Form
 
     private async Task OnImportAsync()
     {
-        _userActions.LogInformation("Login: import profile from .tlp");
+        _userLogs.LogInformation("Login: import profile from .tlp");
         var backup = _services.GetRequiredService<ProfileBackupService>();
         if (!await ProfileFileShare.ImportProfileAsync(this, _auth, backup, _logger).ConfigureAwait(true))
             return;

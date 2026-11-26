@@ -58,11 +58,24 @@ public partial class LoginPage : ContentPage
     private async Task GoToChatsAsync()
     {
         var user = _auth.CurrentUser;
+        var chatsRepo = MauiProgram.Services.GetRequiredService<ChatRepository>();
         if (user != null)
+        {
+            try
+            {
+                var migration = await IdentityMigrationApplier.ApplyPendingAsync(_auth, chatsRepo, _logger)
+                    .ConfigureAwait(true);
+                if (migration != null)
+                    await DisplayAlert("Identity upgraded", migration, "OK").ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Identity migration after login");
+            }
+
             try
             {
                 var p2p = MauiProgram.Services.GetRequiredService<UserP2pRuntime>();
-                var chatsRepo = MauiProgram.Services.GetRequiredService<ChatRepository>();
                 await p2p.EnsureStartedAsync(user).ConfigureAwait(true);
                 await p2p.EnsureAllChatSessionsStartedAsync(user, _auth, chatsRepo, SynchronizationContext.Current)
                     .ConfigureAwait(true);
@@ -71,6 +84,7 @@ public partial class LoginPage : ContentPage
             {
                 _logger.LogWarning(ex, "Ensure P2P sessions on login");
             }
+        }
 
         var chats = MauiProgram.Services.GetRequiredService<ChatsPage>();
         Application.Current!.MainPage = new NavigationPage(chats);

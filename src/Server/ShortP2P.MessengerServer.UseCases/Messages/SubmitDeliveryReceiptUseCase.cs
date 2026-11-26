@@ -7,7 +7,8 @@ public sealed record SubmitDeliveryReceiptCommand(
     string CallerNetworkId,
     string DeviceId,
     string MessageId,
-    DateTime ReceivedAtUtc);
+    DateTime ReceivedAtUtc,
+    bool NotifySender = true);
 
 public sealed class SubmitDeliveryReceiptUseCase(
     IMessageRepository messages,
@@ -49,29 +50,32 @@ public sealed class SubmitDeliveryReceiptUseCase(
         if (!string.Equals(message.TgtNetworkId, caller, StringComparison.Ordinal))
             throw UseCaseException.Unauthorized("Only the message recipient can submit a delivery receipt.");
 
-        var ticket = new DeliveryTicket
+        if (command.NotifySender)
         {
-            MessageId = messageId,
-            ReceivedAtUtc = DateTime.SpecifyKind(command.ReceivedAtUtc, DateTimeKind.Utc)
-        };
+            var ticket = new DeliveryTicket
+            {
+                MessageId = messageId,
+                ReceivedAtUtc = DateTime.SpecifyKind(command.ReceivedAtUtc, DateTimeKind.Utc)
+            };
 
-        var entry = new CachedDeliveryTicket(ticket, message.SrcNetworkId);
-        var writes = new List<Task<bool>>(2);
-        if (options.CacheEnabled)
-        {
-            writes.Add(StorageAccess.TryWriteToCacheAsync(
-                cacheEnabled: true,
-                () => ticketCache.IsWriteAvailable,
-                () => ticketCache.AddAsync(entry, cancellationToken),
-                cancellationToken));
+            var entry = new CachedDeliveryTicket(ticket, message.SrcNetworkId);
+            var writes = new List<Task<bool>>(2);
+            if (options.CacheEnabled)
+            {
+                writes.Add(StorageAccess.TryWriteToCacheAsync(
+                    cacheEnabled: true,
+                    () => ticketCache.IsWriteAvailable,
+                    () => ticketCache.AddAsync(entry, cancellationToken),
+                    cancellationToken));
+            }
+
+            if (options.RepositoryEnabled)
+                writes.Add(StorageAccess.TryWriteAsync(() => tickets.AddAsync(ticket, cancellationToken), cancellationToken));
+
+            var results = await Task.WhenAll(writes).ConfigureAwait(false);
+            if (!results.Any(ok => ok))
+                throw UseCaseException.Unavailable("Failed to store delivery receipt: cache and repository are unavailable.");
         }
-
-        if (options.RepositoryEnabled)
-            writes.Add(StorageAccess.TryWriteAsync(() => tickets.AddAsync(ticket, cancellationToken), cancellationToken));
-
-        var results = await Task.WhenAll(writes).ConfigureAwait(false);
-        if (!results.Any(ok => ok))
-            throw UseCaseException.Unavailable("Failed to store delivery receipt: cache and repository are unavailable.");
 
         // Delete this device's inbox copy; GC message when no copies remain.
         if (options.CacheEnabled)
