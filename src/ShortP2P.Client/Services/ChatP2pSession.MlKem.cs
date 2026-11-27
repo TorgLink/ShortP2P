@@ -16,6 +16,7 @@ public sealed partial class ChatP2PSession
     private int _mlKemAdvertiseInFlight;
     private int _mlKemReestablishInFlight;
     private int _mlKemReestablishAfterMutual;
+    private DateTimeOffset _peerMlKemLastTrueUtc;
 
     /// <summary>Raised when <see cref="IsMlKemSession"/> changes (UI quantum mark).</summary>
     public event EventHandler? MlKemSessionChanged;
@@ -100,7 +101,13 @@ public sealed partial class ChatP2PSession
     {
         // Restore peer advertise persisted from server inbox before this session existed.
         if (_chat.PeerAdvertisesMlKem)
+        {
             Interlocked.Exchange(ref _peerAdvertisesMlKem, 1);
+            // Start grace so a stale wants=False still in the inbox cannot clear the latch.
+            if (_peerMlKemLastTrueUtc == default)
+                _peerMlKemLastTrueUtc = DateTimeOffset.UtcNow;
+        }
+
         if (_chat.MlKemSessionVerified)
             SetMlKemSession(true);
         var token = _cts?.Token ?? CancellationToken.None;
@@ -240,8 +247,24 @@ public sealed partial class ChatP2PSession
     private async Task ApplyPeerMlKemAdvertisementAsync(bool wants, CancellationToken cancellationToken)
     {
         var previous = Volatile.Read(ref _peerAdvertisesMlKem);
+        var currentlyAdvertises = previous == 1 || _chat.PeerAdvertisesMlKem;
+        if (!PeerMlKemAdvertisePolicy.ShouldApply(
+                wants,
+                currentlyAdvertises,
+                IsCryptoPathReadyForMlKem(),
+                DateTimeOffset.UtcNow,
+                _peerMlKemLastTrueUtc))
+        {
+            _logger.LogInformation(
+                "Chat {ChatId}: ignoring peer ML-KEM capability wants={Wants} (keeping peerAdvertises={Keep}, liveP2p={Live})",
+                _chat.Id, wants, currentlyAdvertises, IsCryptoPathReadyForMlKem());
+            return;
+        }
+
         Interlocked.Exchange(ref _peerAdvertisesMlKem, wants ? 1 : 0);
         _chat.PeerAdvertisesMlKem = wants;
+        if (wants)
+            _peerMlKemLastTrueUtc = DateTimeOffset.UtcNow;
         _ = PersistPeerAdvertisesMlKemAsync(wants);
         _logger.LogInformation(
             "Chat {ChatId}: peer ML-KEM capability wants={Wants} (localWants={Local})",
