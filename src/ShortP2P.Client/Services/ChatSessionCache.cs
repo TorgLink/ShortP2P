@@ -57,6 +57,10 @@ public sealed class ChatSessionCache
         return list;
     }
 
+    /// <summary>Snapshot of live sessions (for settings fan-out, e.g. ML-KEM toggle).</summary>
+    public IReadOnlyList<ChatP2PSession> SnapshotSessions() =>
+        _entries.Values.Select(x => x.Session).ToList();
+
     private sealed class SessionCacheEntry(ChatP2PSession session, bool isStarted = false)
     {
         public int Started = isStarted ? 1 : 0;

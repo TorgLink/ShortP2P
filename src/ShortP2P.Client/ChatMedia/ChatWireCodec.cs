@@ -21,6 +21,7 @@ public static class ChatWireCodec
     private const byte KindVocabAccept = 0x08;
     private const byte KindCompressedText = 0x09;
     private const byte KindSessionProbe = 0x0A;
+    private const byte KindMlKemCapability = 0x0B;
     private static ReadOnlySpan<byte> Magic => "S2P1"u8;
 
     /// <summary>Магия S2P1 без успешного разбора вида — чтобы не показывать мусор как текст UTF-8.</summary>
@@ -58,6 +59,20 @@ public static class ChatWireCodec
         body[0] = 1; // version
         body[1] = probeKind;
         challenge.CopyTo(body[2..]);
+        return buf;
+    }
+
+    /// <summary>Encrypted ML-KEM capability: version(1) | flags(1); bit0 = wants ML-KEM.</summary>
+    public static byte[] EncodeMlKemCapability(bool wantsMlKem)
+    {
+        const int bodyLen = 2;
+        var buf = new byte[Magic.Length + 1 + 4 + bodyLen];
+        Magic.CopyTo(buf);
+        buf[Magic.Length] = KindMlKemCapability;
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(Magic.Length + 1, 4), bodyLen);
+        var body = buf.AsSpan(Magic.Length + 1 + 4);
+        body[0] = 1;
+        body[1] = wantsMlKem ? (byte)0x01 : (byte)0x00;
         return buf;
     }
 
@@ -392,6 +407,20 @@ public static class ChatWireCodec
             var probeKind = rest[1];
             var challenge = rest.Slice(2, 8).ToArray();
             message = new ChatWireSessionProbe(probeKind, challenge);
+            return true;
+        }
+
+        if (kind == KindMlKemCapability)
+        {
+            if (rest.Length < 4)
+                return false;
+            var len = BinaryPrimitives.ReadUInt32LittleEndian(rest);
+            rest = rest.Slice(4);
+            if (len != 2 || rest.Length < len)
+                return false;
+            if (rest[0] != 1)
+                return false;
+            message = new ChatWireMlKemCapability((rest[1] & 0x01) != 0);
             return true;
         }
 

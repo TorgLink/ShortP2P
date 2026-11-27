@@ -682,6 +682,20 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
     /// Обновляет ник пира, если пришёл реальный ник (не пустой и не совпадающий с network id),
     /// а в БД сейчас пусто / network id / другой устаревший placeholder.
     /// </summary>
+    public async Task<bool> TrySetMlKemSessionVerifiedAsync(int chatId, bool verified)
+    {
+        var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
+        var chat = await conn.FindAsync<ChatEntity>(chatId).ConfigureAwait(false);
+        if (chat == null)
+            return false;
+        if (chat.MlKemSessionVerified == verified)
+            return false;
+        chat.MlKemSessionVerified = verified;
+        chat.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
+        await conn.UpdateAsync(chat).ConfigureAwait(false);
+        return true;
+    }
+
     public async Task<bool> TryUpdatePeerNicknameAsync(int chatId, string? peerNickname)
     {
         var conn = await _db.GetConnectionAsync().ConfigureAwait(false);

@@ -47,5 +47,11 @@ public class ChatEntity
     /// </summary>
     public bool BotCatalogChecked { get; set; }
 
+    /// <summary>
+    /// True after both peers advertised EnableMlKem and completed ML-KEM session verification
+    /// (capability exchange + re-established session). Used for the quantum UI mark.
+    /// </summary>
+    public bool MlKemSessionVerified { get; set; }
+
     public long UpdatedUtcTicks { get; set; }
 }

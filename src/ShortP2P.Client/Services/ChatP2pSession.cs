@@ -31,7 +31,7 @@ namespace ShortP2P.Client.Services;
 ///     Leader и follower обмениваются сообщениями; BLE ConnectGatt — только у узла с большим MAC
 ///     (ответы — через GATT notify на уже открытой сессии, см. Bluetooth-транспорт).
 /// </summary>
-public sealed class ChatP2PSession : IAsyncDisposable
+public sealed partial class ChatP2PSession : IAsyncDisposable
 {
     private const byte FrameHandshake = 0x01;
     private const byte FrameCipher = 0x02;
@@ -468,6 +468,8 @@ public sealed class ChatP2PSession : IAsyncDisposable
             return;
         _handshakeStatus = status;
         RaiseHandshakeStatusChanged();
+        if (status == ChatHandshakeStatus.Established)
+            OnHandshakeEstablishedMaybeAdvertiseMlKem();
     }
 
     private void RefreshHandshakeStatus()
@@ -810,6 +812,7 @@ public sealed class ChatP2PSession : IAsyncDisposable
             if (udpUnavailable)
                 await EnqueueLatestUnsentMessagesAsync(cancellationToken).ConfigureAwait(false);
             LogSessionRoleContext("P2P session start completed");
+            OnHandshakeEstablishedMaybeAdvertiseMlKem();
         }
         finally
         {
@@ -964,6 +967,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
                         "Chat {ChatId}: processing session setup request (0x04) from {Remote}",
                         _chat.Id, FormatTransportAddress(msg.RemoteAddress));
                     await ProcessSessionSetupRequestAsync(msg.Body, msg.RemoteAddress, cancellationToken)
+                        .ConfigureAwait(false);
+                    return;
+                case HandshakeKind.MlKemCapability:
+                    await ProcessMlKemCapabilityFrameAsync(msg.Body, msg.RemoteAddress, cancellationToken)
                         .ConfigureAwait(false);
                     return;
             }
@@ -1252,6 +1259,10 @@ public sealed class ChatP2PSession : IAsyncDisposable
                     break;
                 case ChatWireUserInfo userInfo:
                     await ApplyIncomingUserInfoAsync(userInfo, cancellationToken).ConfigureAwait(false);
+                    break;
+                case ChatWireMlKemCapability mlKemCap:
+                    await ApplyPeerMlKemAdvertisementFromWireAsync(mlKemCap, cancellationToken)
+                        .ConfigureAwait(false);
                     break;
             }
         }

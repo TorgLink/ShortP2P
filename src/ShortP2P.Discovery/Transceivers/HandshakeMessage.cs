@@ -8,8 +8,14 @@ public enum HandshakeKind : byte
     /// <summary>RSA-зашифрованный handshake-пакет инициатора (0x01 + 128 байт).</summary>
     Handshake = 0x01,
 
-    /// <summary>Запрос на установку сессии от подписчика лидеру (0x04 + 16 байт Guid).</summary>
-    SessionSetupRequest = 0x04
+    /// <summary>Запрос на установку сессии от подписчика лидеру (0x04 + network id wire bytes).</summary>
+    SessionSetupRequest = 0x04,
+
+    /// <summary>
+    /// ML-KEM capability advertisement (0x05 + network id + flags).
+    /// Bit 0 of flags = local EnableMlKem. Unknown to older clients (ignored by multiplexer length check).
+    /// </summary>
+    MlKemCapability = 0x05
 }
 
 /// <summary>

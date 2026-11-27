@@ -231,6 +231,16 @@ public sealed class UserP2pRuntime : IAsyncDisposable
             s => s.ApplyChatRow(chat));
     }
 
+    /// <summary>
+    /// Fan out EnableMlKem changes to live chat sessions (advertise + mutual verify / re-establish).
+    /// </summary>
+    public void NotifyMlKemSettingChanged()
+    {
+        ShortP2P.Crypto.MlKemCrypto.SetFeatureEnabled(Settings.EnableMlKem);
+        foreach (var session in _sessionCache.SnapshotSessions())
+            _ = session.OnLocalMlKemSettingChangedAsync();
+    }
+
     public bool IsChatSessionStarted(int chatId)
     {
         return _sessionCache.IsStarted(chatId);
