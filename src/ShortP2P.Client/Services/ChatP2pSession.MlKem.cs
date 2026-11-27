@@ -98,12 +98,19 @@ public sealed partial class ChatP2PSession
 
     private void OnHandshakeEstablishedMaybeAdvertiseMlKem()
     {
+        // Restore peer advertise persisted from server inbox before this session existed.
+        if (_chat.PeerAdvertisesMlKem)
+            Interlocked.Exchange(ref _peerAdvertisesMlKem, 1);
         if (_chat.MlKemSessionVerified)
             SetMlKemSession(true);
         var token = _cts?.Token ?? CancellationToken.None;
         _ = AdvertiseAndEvaluateMlKemAsync(token);
     }
 
+    /// <summary>
+    /// Live P2P AES path available (UDP/BLE/mesh). Messenger-server-only chats never get this
+    /// while handshake stays InProgress — Phase A mutual mark must not depend on it.
+    /// </summary>
     private bool IsCryptoPathReadyForMlKem() =>
         _handshakeStatus == ChatHandshakeStatus.Established
         || IsFollowerCryptoReady()
@@ -232,11 +239,41 @@ public sealed partial class ChatP2PSession
 
     private async Task ApplyPeerMlKemAdvertisementAsync(bool wants, CancellationToken cancellationToken)
     {
+        var previous = Volatile.Read(ref _peerAdvertisesMlKem);
         Interlocked.Exchange(ref _peerAdvertisesMlKem, wants ? 1 : 0);
+        _chat.PeerAdvertisesMlKem = wants;
+        _ = PersistPeerAdvertisesMlKemAsync(wants);
         _logger.LogInformation(
             "Chat {ChatId}: peer ML-KEM capability wants={Wants} (localWants={Local})",
             _chat.Id, wants, LocalWantsMlKem);
+
+        // First time we learn the peer wants ML-KEM, echo our capability so the other side
+        // (and a delayed local inbox) can converge — receiving a capability does not advertise.
+        if (wants && previous == 0 && LocalWantsMlKem)
+        {
+            try
+            {
+                await SendMlKemCapabilityAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "Chat {ChatId}: ML-KEM capability echo failed", _chat.Id);
+            }
+        }
+
         await EvaluateMutualMlKemAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task PersistPeerAdvertisesMlKemAsync(bool advertises)
+    {
+        try
+        {
+            await _repo.TrySetPeerAdvertisesMlKemAsync(_chat.Id, advertises).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: persist PeerAdvertisesMlKem failed", _chat.Id);
+        }
     }
 
     private async Task EvaluateMutualMlKemAsync(CancellationToken cancellationToken)
@@ -250,21 +287,17 @@ public sealed partial class ChatP2PSession
             return;
         }
 
-        if (!IsCryptoPathReadyForMlKem())
-            return;
-
-        // Both sides want ML-KEM. If we are not yet on a verified ML-KEM session, re-establish once.
+        // Phase A: mutual capability is enough for the quantum mark. Session AES from ML-KEM
+        // is Phase B. Server-only followers never reach HandshakeStatus.Established.
         if (!IsMlKemSession)
-        {
-            if (Interlocked.CompareExchange(ref _mlKemReestablishAfterMutual, 1, 0) == 0)
-            {
-                await ReestablishSessionForMlKemAsync(cancellationToken).ConfigureAwait(false);
-                return;
-            }
-        }
-
-        if (mutual && IsCryptoPathReadyForMlKem())
             SetMlKemSession(true);
+
+        // Optional one-shot P2P re-key only when a live AES path already exists.
+        if (IsCryptoPathReadyForMlKem() &&
+            Interlocked.CompareExchange(ref _mlKemReestablishAfterMutual, 1, 0) == 0)
+        {
+            await ReestablishSessionForMlKemAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task ReestablishSessionForMlKemAsync(CancellationToken cancellationToken)

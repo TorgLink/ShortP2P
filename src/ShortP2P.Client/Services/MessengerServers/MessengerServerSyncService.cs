@@ -2943,8 +2943,10 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                     }
                     else
                     {
+                        await _chats.TrySetPeerAdvertisesMlKemAsync(chatId, mlKemCap.WantsMlKem)
+                            .ConfigureAwait(false);
                         _logger.LogInformation(
-                            "Chat {ChatId}: ML-KEM capability from server with no live session yet wants={Wants}",
+                            "Chat {ChatId}: persisted peer ML-KEM capability with no live session yet wants={Wants}",
                             chatId, mlKemCap.WantsMlKem);
                     }
 

@@ -182,6 +182,12 @@ public sealed class AppDatabase
                 "ALTER TABLE chats ADD COLUMN BotCatalogChecked INTEGER NOT NULL DEFAULT 0")
             .ConfigureAwait(false);
         await TryAlterAsync(connection,
+                "ALTER TABLE chats ADD COLUMN MlKemSessionVerified INTEGER NOT NULL DEFAULT 0")
+            .ConfigureAwait(false);
+        await TryAlterAsync(connection,
+                "ALTER TABLE chats ADD COLUMN PeerAdvertisesMlKem INTEGER NOT NULL DEFAULT 0")
+            .ConfigureAwait(false);
+        await TryAlterAsync(connection,
             "ALTER TABLE messages ADD COLUMN DeliveryStatus INTEGER NOT NULL DEFAULT 2").ConfigureAwait(false);
         try
         {

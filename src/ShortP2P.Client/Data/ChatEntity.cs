@@ -53,5 +53,11 @@ public class ChatEntity
     /// </summary>
     public bool MlKemSessionVerified { get; set; }
 
+    /// <summary>
+    /// Last observed peer EnableMlKem advertisement (server or P2P). Survives inbox arrival
+    /// before the local chat session exists so mutual verify can complete on start.
+    /// </summary>
+    public bool PeerAdvertisesMlKem { get; set; }
+
     public long UpdatedUtcTicks { get; set; }
 }

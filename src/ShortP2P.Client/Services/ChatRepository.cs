@@ -696,6 +696,20 @@ public sealed class ChatRepository(AppDatabase appDatabase, PeerBlacklist? black
         return true;
     }
 
+    public async Task<bool> TrySetPeerAdvertisesMlKemAsync(int chatId, bool advertises)
+    {
+        var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
+        var chat = await conn.FindAsync<ChatEntity>(chatId).ConfigureAwait(false);
+        if (chat == null)
+            return false;
+        if (chat.PeerAdvertisesMlKem == advertises)
+            return false;
+        chat.PeerAdvertisesMlKem = advertises;
+        chat.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
+        await conn.UpdateAsync(chat).ConfigureAwait(false);
+        return true;
+    }
+
     public async Task<bool> TryUpdatePeerNicknameAsync(int chatId, string? peerNickname)
     {
         var conn = await _db.GetConnectionAsync().ConfigureAwait(false);
