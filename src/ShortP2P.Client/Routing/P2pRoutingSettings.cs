@@ -53,4 +53,10 @@ public sealed class P2pRoutingSettings
     ///     При false: не отвечаем на discovery и не шлём presence ping; инвайты и прочий трафик не затрагиваются.
     /// </summary>
     public bool VisibleForSearch { get; set; } = true;
+
+    /// <summary>
+    ///     Prefer ML-KEM (quantum) key encapsulation at session setup when the peer/path supports it.
+    ///     Default on. Does not replace the classic handshake when ML-KEM is unavailable (e.g. LoRa).
+    /// </summary>
+    public bool EnableMlKem { get; set; } = true;
 }

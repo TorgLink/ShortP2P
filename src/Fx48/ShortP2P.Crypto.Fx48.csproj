@@ -8,8 +8,10 @@
   <ItemGroup>
     <Compile Include="..\..\ShortP2P.Crypto\*.cs" />
     <Compile Include="Compat\CryptographicOperations.cs" />
+    <Compile Include="Compat\NetFrameworkCrypto.cs" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
   </ItemGroup>
 </Project>

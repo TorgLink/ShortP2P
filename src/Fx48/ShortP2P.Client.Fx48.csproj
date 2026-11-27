@@ -40,6 +40,7 @@
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireVocabAccept.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireCompressedText.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireSessionProbe.cs" />
+    <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireMlKemCapability.cs" />
 
     <Compile Include="..\ShortP2P.Client\ChatMedia\BotBlobChunker.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\BotChunkRetry.cs" />
@@ -70,9 +71,13 @@
     <Compile Include="..\ShortP2P.Client\Services\ChatMessageAppendedEventArgs.cs" />
     <Compile Include="..\ShortP2P.Client\Services\ChatCreatedEventArgs.cs" />
     <Compile Include="..\ShortP2P.Client\Services\PeerPublicKeyChangedEventArgs.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\PeerKeyChangeProposedEventArgs.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\PendingPeerKeyChange.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\IdentityMigrationApplier.cs" />
     <Compile Include="..\ShortP2P.Client\Services\ChatDeliveryPath.cs" />
     <Compile Include="..\ShortP2P.Client\Services\PeerBlacklist.cs" />
     <Compile Include="..\ShortP2P.Client\Services\ChatSessionCache.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\PeerMlKemAdvertisePolicy.cs" />
     <Compile Include="..\ShortP2P.Client\Services\PeerKeySource.cs" />
     <Compile Include="..\ShortP2P.Client\Services\LanChatStartContext.cs" />
     <Compile Include="..\ShortP2P.Client\Services\LanChatStartFromDiscovery.cs" />
@@ -116,7 +121,7 @@
     <PackageReference Include="SixLabors.ImageSharp" Version="2.1.13" />
     <PackageReference Include="ZXing.Net" Version="0.16.11" />
     <PackageReference Include="ZXing.Net.Bindings.ImageSharp.V2" Version="0.16.20" />
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <!-- System.Formats.Cbor 10 requires Bcl.HashCode >= 6.0.0 (Fx48 props pin 1.1.1) -->
     <PackageReference Update="Microsoft.Bcl.HashCode" Version="6.0.0" />
     <PackageReference Include="System.Formats.Cbor" Version="10.0.0" />

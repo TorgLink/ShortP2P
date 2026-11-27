@@ -90,6 +90,10 @@ public sealed class DataPortMultiplexer : IAsyncDisposable
                 when msg.Payload.Length == 1 + CompressedNetworkId.WireLength:
                 Handshake.HandleIncoming(HandshakeKind.SessionSetupRequest, msg.Payload.Slice(1), msg.RemoteAddress);
                 return;
+            case (byte)HandshakeKind.MlKemCapability
+                when msg.Payload.Length == 1 + CompressedNetworkId.WireLength + 1:
+                Handshake.HandleIncoming(HandshakeKind.MlKemCapability, msg.Payload.Slice(1), msg.RemoteAddress);
+                return;
             case MessageTransceiver.FrameCipher when msg.Payload.Length > 1:
                 Message.HandleIncoming(msg.Payload.Slice(1), msg.RemoteAddress);
                 return;

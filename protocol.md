@@ -6,10 +6,14 @@
 
 ## 1. Идентификация пиров
 
-- **NetworkId** — **12 байт** в wire-формате (случайные октеты, `CompressedNetworkId.WireLength`).
+- **Identity v2**: пара **Ed25519** (подпись / отпечаток) + **X25519** (ECDH для handshake и server sealed-box).
+- **NetworkId** — **12 байт** = первые 12 байт `SHA-256(Ed25519 public)` (`CompressedNetworkId.FromIdentityPublicKey`).
 - В UI и в JSON QR — **короткая строка** (`CompressedNetworkId.ToShortString()`): base64url от 12 байт (без padding, ~16 символов).
+- Публичный ключ в invite/QR — JSON `{"v":2,"ed":"...","x":"..."}`; приём **обязан** проверить `NetworkId == f(ed)`.
+- Первый контакт (LAN invite / QR) — **TOFU** (ключ закрепляется). Смена ключа у известного контакта — только после явного Accept в UI.
 - **BLE-реклама**: Manufacturer `[0x02][12 байт]`, GATT Service Data — `12 байт` (UUID сервиса в AD отдельно).
-- Сравнение ролей в крипто-сессии чата: лексикографическое сравнение **12 байт** (`CompressedNetworkId.CompareTo`): пир с **меньшим** NetworkId — **лидер** RSA-handshake; пир с **большим** — только запрос установки сессии (см. §6).
+- Сравнение ролей в крипто-сессии чата: лексикографическое сравнение **12 байт** (`CompressedNetworkId.CompareTo`): пир с **меньшим** NetworkId — **лидер** handshake; пир с **большим** — только запрос установки сессии (см. §6).
+- Миграция со старого RSA: при логине генерируются новые ключи и новый NetworkId, локальные чаты удаляются; бэкап личности — только `.tlp` со схемой v2.
 
 ---
 
@@ -60,8 +64,8 @@
 | 6–21 | NetworkId инициатора (16 байт) |
 | 22–23 | Длина ника UTF-8, **uint16 BE** |
 | … | Ник |
-| … | Длина RSA public key JSON, **uint32 BE** |
-| … | UTF-8 JSON публичного ключа (`RsaKeySerializer`) |
+| … | Длина identity public key JSON, **uint32 BE** |
+| … | UTF-8 JSON публичного ключа (`IdentityKeySerializer`, `v:2`) |
 | … | Длина списка хостов UTF-8, **uint16 BE** |
 | … | Хосты (часто IPv4 через запятую; могут включать MAC для BT) |
 | … | Порт для ответного invite / достижимости, **uint16 BE** (не порт data-чата) |
@@ -79,7 +83,7 @@
 | Байт | Имя | Назначение |
 |------|-----|------------|
 | `0x30` | Chat invite | Обрабатывается `IncomingChatInviteHandler` (тот же формат, что §4). |
-| `0x01` | RSA handshake | Ровно **129** байт: `0x01` + **128** байт RSA-OAEP(SHA1) ciphertext. |
+| `0x01` | Identity handshake | `0x01` + `P2PHandshake.HandshakePacketBytes` (X25519 sealed session keys). |
 | `0x04` | Session setup request | Ровно **17** байт: `0x04` + **16** байт NetworkId отправителя (wire Guid). |
 | `0x02` | Cipher | `0x02` + внутренний шифропакет `P2PSession` (см. §7). |
 
@@ -91,25 +95,25 @@
 
 ---
 
-## 6. Установка крипто-сессии (RSA → общий AES)
+## 6. Установка крипто-сессии (X25519 → общий AES)
 
-- Ключи: **RSA-1024**, шифрование сессионного материала **RSA-OAEP(SHA1)**.
-- Сессионный материал: **16 байт** AES-128 key + **32 байта** MAC key (итого 48 байт plaintext внутри 128-байтного RSA блока).
+- Лидер генерирует ephemeral X25519, ECDH с **статическим X25519** пира, HKDF, AES-GCM оборачивает сессионный материал (**16 байт** AES-128 + **32 байта** MAC).
+- Кадр handshake: **`0x01` + `P2PHandshake.HandshakePacketBytes`** (ver=2 | eph_pub | nonce | ciphertext | tag).
 
 ### 6.1. Роли по NetworkId
 
-- Сравниваются `Guid` локального пользователя и пира из чата.
-- **Лидер** (меньший Guid): формирует handshake через `P2PCrypto.CreateHandshakeInitiation`, отправляет **`0x01` + 128 байт**.
-- **Подписчик** (больший Guid): **не** шлёт `0x01` на data-канал; отправляет только **`0x04` + 16 байт** своего NetworkId и ждёт handshake от лидера.
-- Лидер при приёме **`0x04`** проверяет, что Guid совпадает с ожидаемым пиром, затем при необходимости выполняет свой handshake.
-- Лидер **игнорирует** входящий `0x01` (не строит сессию как ответчик по чужому пакету).
-- Подписчик при приёме `0x01` вызывает `P2PCrypto.CreateSession(localPrivate, handshake128)` и поднимает `MessengerService`.
+- Сравниваются wire-байты NetworkId локального пользователя и пира из чата.
+- **Лидер** (меньший id): `P2PCrypto.CreateHandshakeInitiation`, отправляет **`0x01` + handshake body**.
+- **Подписчик** (больший id): **не** шлёт `0x01`; отправляет только **`0x04` + 12 байт** своего NetworkId и ждёт handshake от лидера.
+- Лидер при приёме **`0x04`** проверяет, что id совпадает с ожидаемым пиром, затем при необходимости выполняет свой handshake.
+- Лидер **игнорирует** входящий `0x01`.
+- Подписчик при приёме `0x01` вызывает `P2PCrypto.CreateSession(localPrivate, handshakeBody)` и поднимает `MessengerService`.
 
 ---
 
 ## 7. Симметричное шифрование (`P2PSession`)
 
-После обмена RSA стороны используют общий AES-128 + HMAC.
+После handshake стороны используют общий AES-128 + HMAC.
 
 - **Пакет**: `IV (16)` || `ciphertext` || `tag (16)` — длина ciphertext кратна 16 (PKCS7), **общая длина пакета ≤ 128 байт**.
 - **AES**: CBC, PKCS7.
@@ -225,7 +229,7 @@ Plaintext для `P2PSession` — либо **устаревший** сырой U
 
 ## 11. QR контакта (вне UDP, JSON текст)
 
-Версия **`v`: 1**. Поля (`PeerQrPayload`): `n` ник, `id` короткий NetworkId, `k` RSA public key JSON, `p` порт, `h`/`ha` IPv4/IPv6, `b`/`ba` Bluetooth MAC. Сериализация: `System.Text.Json` (`PeerQrCodec`). Это **не** бинарный wire-формат сети, а обмен контактом из приложения.
+Версия **`v`: 1**. Поля (`PeerQrPayload`): `n` ник, `id` короткий NetworkId, `k` identity public key JSON (`v:2`), `p` порт, `h`/`ha` IPv4/IPv6, `b`/`ba` Bluetooth MAC. `id` должен совпадать с `f(k)`. Сериализация: `System.Text.Json` (`PeerQrCodec`).
 
 ---
 
@@ -243,7 +247,7 @@ Plaintext для `P2PSession` — либо **устаревший** сырой U
 - Расширения presence-пинга (порт, link preset, capabilities) опциональны; старые клиенты шлют короткие пакеты.
 - Invite требует магию `SP2I` и версию **1**.
 - LAN FIND/FOUND требуют магию `SP2F` и версию **1**.
-- Ответчик с **большим** NetworkId не должен слать RSA-handshake первым: старые клиенты с другой политикой могут быть несовместимы с текущим правилом лидера.
+- Ответчик с **большим** NetworkId не должен слать handshake первым.
 
 ---
 
@@ -254,7 +258,7 @@ Plaintext для `P2PSession` — либо **устаревший** сырой U
 | Invite | `ShortP2P.Client/Routing/ChatInviteCodec.cs` |
 | Presence | `ShortP2P.Client/Routing/PresencePingCodec.cs` (кадр + `Transceiver`), `LinkTechnologyPreset`, `PresencePeerCapabilities` |
 | Data кадры чата | `ShortP2P.Client/Services/ChatP2pSession.cs` |
-| RSA / AES | `ShortP2P.Crypto/P2PHandshake.cs`, `P2PSession.cs`, `P2PCrypto.cs` |
+| Identity / AES | `ShortP2P.Crypto/Identity*.cs`, `P2PHandshake.cs`, `P2PSession.cs`, `P2PCrypto.cs` |
 | LAN find / relay | `ShortP2P.Client/Routing/LanRoutingCodec.cs` |
 | Wire чата | `ShortP2P.Client/ChatMedia/ChatWireCodec.cs` |
 | Зонд ACK/OK | `ShortP2P.Client/Services/SessionCryptoProbe.cs` |

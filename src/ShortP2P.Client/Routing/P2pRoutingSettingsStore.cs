@@ -20,6 +20,7 @@ public sealed class P2pRoutingSettingsStore(ISessionStorage storage)
     private const string KTrafficSavingEnabledLegacy = "p2p_traffic_saving_enabled";
     private const string KAdvertisedCaps = "p2p_advertised_caps";
     private const string KVisibleForSearch = "p2p_visible_for_search";
+    private const string KEnableMlKem = "p2p_enable_mlkem";
 
     private readonly ISessionStorage _storage = storage ?? throw new ArgumentNullException(nameof(storage));
 
@@ -61,6 +62,13 @@ public sealed class P2pRoutingSettingsStore(ISessionStorage storage)
             s.VisibleForSearch = visible;
         else
             s.VisibleForSearch = true;
+
+        // Missing key → default true (ML-KEM preferred when available).
+        var mlKemRaw = await _storage.GetAsync(KEnableMlKem).ConfigureAwait(false);
+        if (bool.TryParse(mlKemRaw, out var mlKem))
+            s.EnableMlKem = mlKem;
+        else
+            s.EnableMlKem = true;
 
         return s;
     }
@@ -104,5 +112,6 @@ public sealed class P2pRoutingSettingsStore(ISessionStorage storage)
         var caps = settings.AdvertisedPeerCapabilities | PresencePeerCapabilities.Chat;
         await _storage.SetAsync(KAdvertisedCaps, ((ushort)caps).ToString()).ConfigureAwait(false);
         await _storage.SetAsync(KVisibleForSearch, settings.VisibleForSearch.ToString()).ConfigureAwait(false);
+        await _storage.SetAsync(KEnableMlKem, settings.EnableMlKem.ToString()).ConfigureAwait(false);
     }
 }

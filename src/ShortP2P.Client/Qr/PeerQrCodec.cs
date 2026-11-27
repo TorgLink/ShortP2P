@@ -82,13 +82,15 @@ public static class PeerQrCodec
             return false;
         }
 
-        try
+        if (!IdentityKeySerializer.TryDeserializePublic(p.K.Trim(), out var pub))
         {
-            _ = RsaKeySerializer.DeserializePublic(p.K.Trim());
+            error = "QR contains an invalid identity public key.";
+            return false;
         }
-        catch
+
+        if (!CompressedNetworkId.TryParseShortString(p.Id, out var nid) || !nid.MatchesIdentityPublicKey(pub))
         {
-            error = "QR contains an invalid RSA public key.";
+            error = "QR NetworkId does not match identity public key.";
             return false;
         }
 

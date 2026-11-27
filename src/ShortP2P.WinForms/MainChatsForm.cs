@@ -718,7 +718,7 @@ public sealed class MainChatsForm : Form
 
         try
         {
-            RsaKeySerializer.DeserializePublic(dlg.PeerPublicKeyJson);
+            IdentityKeySerializer.DeserializePublic(dlg.PeerPublicKeyJson);
         }
         catch (Exception ex)
         {
@@ -792,7 +792,7 @@ public sealed class MainChatsForm : Form
         var u = _auth.CurrentUser;
         if (u == null) return;
         _userActions.LogInformation("Chats: copy keys to clipboard");
-        var pub = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        var pub = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         var text = $"Network id: {u.NetworkIdShort}\r\nPublic key JSON:\r\n{pub}";
         try
         {

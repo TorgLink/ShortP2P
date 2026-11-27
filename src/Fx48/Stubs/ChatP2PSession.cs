@@ -35,6 +35,10 @@ public sealed class ChatP2PSession
 
     private ChatEntity _chat;
     private int _flushWorkerRunning;
+    private int _peerAdvertisesMlKem;
+    private int _isMlKemSession;
+    private int _mlKemAdvertiseInFlight;
+    private DateTimeOffset _peerMlKemLastTrueUtc;
 
     public ChatP2PSession(
         ChatEntity chat,
@@ -76,6 +80,20 @@ public sealed class ChatP2PSession
     /// <summary>Fx48 does not track a live server pin URL on the session.</summary>
     public string? ActiveMessengerServerBaseUrl =>
         PeerKeySource.IsServer(_chat.PeerKeySourceKind) ? _chat.PeerKeySourceDetail : null;
+
+    /// <summary>Raised when <see cref="IsMlKemSession"/> changes (UI quantum mark).</summary>
+    public event EventHandler? MlKemSessionChanged;
+
+    /// <summary>Peer advertised EnableMlKem via capability exchange (server inbox on Fx48).</summary>
+    public bool PeerAdvertisesMlKem => Volatile.Read(ref _peerAdvertisesMlKem) == 1;
+
+    /// <summary>
+    /// Mutual EnableMlKem after capability exchange (Phase A mark; no P2P AES re-key on Fx48).
+    /// </summary>
+    public bool IsMlKemSession => Volatile.Read(ref _isMlKemSession) == 1;
+
+    private static bool LocalWantsMlKem =>
+        MlKemCrypto.IsFeatureEnabled && MlKemCrypto.IsSupported;
 
     public event EventHandler? MessagesChanged;
 
@@ -198,7 +216,7 @@ public sealed class ChatP2PSession
         byte[] wire;
         try
         {
-            var privateKey = RsaKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
+            var privateKey = IdentityKeySerializer.DeserializePrivate(_user.RsaPrivateJson);
             var opened = MessengerServerPayloadCodec.Open(
                 ciphertext, privateKey, _chat.PeerNetworkIdShort, ServerCipherSessionStore.Shared);
             if (opened.ChatWire == null)
@@ -358,6 +376,188 @@ public sealed class ChatP2PSession
         string? serverBaseUrl = null) =>
         Task.CompletedTask;
 
+    /// <summary>Called when the user toggles EnableMlKem in settings.</summary>
+    public Task OnLocalMlKemSettingChangedAsync() =>
+        AdvertiseAndEvaluateMlKemAsync(CancellationToken.None);
+
+    /// <summary>
+    /// Apply peer ML-KEM capability from messenger-server inbox
+    /// (<see cref="IsReadyForServerReceive"/> stays false on Fx48).
+    /// </summary>
+    public Task ApplyPeerMlKemCapabilityFromServerAsync(bool wantsMlKem, CancellationToken cancellationToken) =>
+        ApplyPeerMlKemAdvertisementAsync(wantsMlKem, cancellationToken);
+
+    private void RaiseMlKemSessionChanged()
+    {
+        if (_uiSynchronizationContext != null)
+            _uiSynchronizationContext.Post(_ => MlKemSessionChanged?.Invoke(this, EventArgs.Empty), null);
+        else
+            MlKemSessionChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void SetMlKemSession(bool value)
+    {
+        var next = value ? 1 : 0;
+        if (Interlocked.Exchange(ref _isMlKemSession, next) == next)
+            return;
+        _chat.MlKemSessionVerified = value;
+        _ = PersistMlKemVerifiedAsync(value);
+        RaiseMlKemSessionChanged();
+        _logger?.LogInformation(
+            "Chat {ChatId}: session encryption switched to {Encryption} (peerAdvertisesMlKem={Peer}, localWantsMlKem={Local}); cryptoParams={CryptoParams}",
+            _chat.Id,
+            value ? "ML-KEM" : "legacy",
+            PeerAdvertisesMlKem,
+            LocalWantsMlKem,
+            P2PCrypto.DescribeSessionParameters(value));
+    }
+
+    private async Task PersistMlKemVerifiedAsync(bool verified)
+    {
+        try
+        {
+            await _repo.TrySetMlKemSessionVerifiedAsync(_chat.Id, verified).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Chat {ChatId}: persist MlKemSessionVerified failed", _chat.Id);
+        }
+    }
+
+    private async Task PersistPeerAdvertisesMlKemAsync(bool advertises)
+    {
+        try
+        {
+            await _repo.TrySetPeerAdvertisesMlKemAsync(_chat.Id, advertises).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Chat {ChatId}: persist PeerAdvertisesMlKem failed", _chat.Id);
+        }
+    }
+
+    private void RestoreMlKemStateFromChatRow()
+    {
+        if (_chat.PeerAdvertisesMlKem)
+        {
+            Interlocked.Exchange(ref _peerAdvertisesMlKem, 1);
+            if (_peerMlKemLastTrueUtc == default)
+                _peerMlKemLastTrueUtc = DateTimeOffset.UtcNow;
+        }
+
+        if (_chat.MlKemSessionVerified)
+            SetMlKemSession(true);
+    }
+
+    private async Task AdvertiseAndEvaluateMlKemAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.CompareExchange(ref _mlKemAdvertiseInFlight, 1, 0) != 0)
+            return;
+        try
+        {
+            await SendMlKemCapabilityAsync(cancellationToken).ConfigureAwait(false);
+            await EvaluateMutualMlKemAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // ignore
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Chat {ChatId}: ML-KEM advertise/evaluate failed", _chat.Id);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _mlKemAdvertiseInFlight, 0);
+        }
+    }
+
+    private async Task SendMlKemCapabilityAsync(CancellationToken cancellationToken)
+    {
+        var wants = LocalWantsMlKem;
+        try
+        {
+            var wire = ChatWireCodec.EncodeMlKemCapability(wants);
+            var serverMessageId = await _servers
+                .TryDeliverWireAsync(_chat, _user, wire, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(serverMessageId))
+            {
+                _logger?.LogInformation(
+                    "Chat {ChatId}: ML-KEM capability sent via messenger server wants={Wants} serverMessageId={ServerMessageId}",
+                    _chat.Id, wants, serverMessageId);
+            }
+            else
+            {
+                _logger?.LogInformation(
+                    "Chat {ChatId}: ML-KEM capability not delivered yet wants={Wants} (peerAdvertisesMlKem still {Peer})",
+                    _chat.Id, wants, PeerAdvertisesMlKem);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "Chat {ChatId}: server ML-KEM capability send failed", _chat.Id);
+        }
+    }
+
+    private async Task ApplyPeerMlKemAdvertisementAsync(bool wants, CancellationToken cancellationToken)
+    {
+        var previous = Volatile.Read(ref _peerAdvertisesMlKem);
+        var currentlyAdvertises = previous == 1 || _chat.PeerAdvertisesMlKem;
+        // Fx48 has no live P2P AES path — always treat as server-only for the latch policy.
+        if (!PeerMlKemAdvertisePolicy.ShouldApply(
+                wants,
+                currentlyAdvertises,
+                liveP2pCryptoPath: false,
+                DateTimeOffset.UtcNow,
+                _peerMlKemLastTrueUtc))
+        {
+            _logger?.LogInformation(
+                "Chat {ChatId}: ignoring peer ML-KEM capability wants={Wants} (keeping peerAdvertises={Keep})",
+                _chat.Id, wants, currentlyAdvertises);
+            return;
+        }
+
+        Interlocked.Exchange(ref _peerAdvertisesMlKem, wants ? 1 : 0);
+        _chat.PeerAdvertisesMlKem = wants;
+        if (wants)
+            _peerMlKemLastTrueUtc = DateTimeOffset.UtcNow;
+        _ = PersistPeerAdvertisesMlKemAsync(wants);
+        _logger?.LogInformation(
+            "Chat {ChatId}: peer ML-KEM capability wants={Wants} (localWants={Local})",
+            _chat.Id, wants, LocalWantsMlKem);
+
+        if (wants && previous == 0 && LocalWantsMlKem)
+        {
+            try
+            {
+                await SendMlKemCapabilityAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.LogDebug(ex, "Chat {ChatId}: ML-KEM capability echo failed", _chat.Id);
+            }
+        }
+
+        await EvaluateMutualMlKemAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task EvaluateMutualMlKemAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var mutual = LocalWantsMlKem && PeerAdvertisesMlKem;
+        if (!mutual)
+        {
+            if (IsMlKemSession)
+                SetMlKemSession(false);
+            return Task.CompletedTask;
+        }
+
+        if (!IsMlKemSession)
+            SetMlKemSession(true);
+        return Task.CompletedTask;
+    }
+
     /// <summary>Fx48: no mesh handshake; re-queue pending sends after a peer ChatRequest resync.</summary>
     public Task HandlePeerInviteResyncAsync(CancellationToken cancellationToken = default) =>
         EnqueueExistingPendingAsync(cancellationToken);
@@ -399,6 +599,9 @@ public sealed class ChatP2PSession
             if (ensured != null)
                 ApplyChatRow(ensured);
         }
+
+        RestoreMlKemStateFromChatRow();
+        _ = AdvertiseAndEvaluateMlKemAsync(cancellationToken);
 
         _logger?.LogDebug(
             "Chat {ChatId}: StartAsync peer={PeerId} IsBot={IsBot} hasPeerKey={HasKey} catalogChecked={Checked}",

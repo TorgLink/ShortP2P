@@ -108,6 +108,8 @@ public partial class ChatsPage : ContentPage
         _messengerServers.TrustThreatDetected += OnMessengerServerTrustThreat;
         _chats.PeerPublicKeyChanged -= OnPeerPublicKeyChanged;
         _chats.PeerPublicKeyChanged += OnPeerPublicKeyChanged;
+        _chats.PeerKeyChangeProposed -= OnPeerKeyChangeProposed;
+        _chats.PeerKeyChangeProposed += OnPeerKeyChangeProposed;
         _messengerServers.FailoverCompleted -= OnMessengerServerFailover;
         _messengerServers.FailoverCompleted += OnMessengerServerFailover;
         EnsurePresenceRefreshTimerStarted();
@@ -132,6 +134,7 @@ public partial class ChatsPage : ContentPage
         _p2p.LocalScan.ClientsChanged -= OnLanPresenceChanged;
         _messengerServers.TrustThreatDetected -= OnMessengerServerTrustThreat;
         _chats.PeerPublicKeyChanged -= OnPeerPublicKeyChanged;
+        _chats.PeerKeyChangeProposed -= OnPeerKeyChangeProposed;
         _messengerServers.FailoverCompleted -= OnMessengerServerFailover;
         if (_presenceRefreshTimer != null)
             _presenceRefreshTimer.Stop();
@@ -162,6 +165,25 @@ public partial class ChatsPage : ContentPage
                 PeerSafetyDisplay.KeyChangeTitle,
                 PeerSafetyDisplay.FormatKeyChangeWarning(e),
                 "OK").ConfigureAwait(true);
+        });
+    }
+
+    private void OnPeerKeyChangeProposed(object? sender, PeerKeyChangeProposedEventArgs e)
+    {
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            var accept = await DisplayAlert(
+                PeerSafetyDisplay.KeyChangeTitle,
+                PeerSafetyDisplay.FormatKeyChangeProposal(e),
+                "Accept",
+                "Reject").ConfigureAwait(true);
+            if (accept)
+                await _chats.AcceptPendingPeerKeyChangeAsync(e.ChatId).ConfigureAwait(true);
+            else
+                _chats.RejectPendingPeerKeyChange(e.ChatId);
+            var u = _auth.CurrentUser;
+            if (u != null)
+                RefreshSafetyHeader(u);
         });
     }
 
@@ -355,7 +377,7 @@ public partial class ChatsPage : ContentPage
     {
         var u = _auth.CurrentUser;
         if (u == null) return;
-        var pub = RsaKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
+        var pub = IdentityKeySerializer.SerializePublic(_auth.GetCurrentPublicKey());
         var text = $"Network id: {u.NetworkIdShort}\nPublic key JSON:\n{pub}";
         await Clipboard.Default.SetTextAsync(text).ConfigureAwait(true);
         await DisplayAlert("Copied", "Network id and public key JSON copied to clipboard.", "OK").ConfigureAwait(true);
