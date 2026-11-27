@@ -40,6 +40,7 @@
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireVocabAccept.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireCompressedText.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireSessionProbe.cs" />
+    <Compile Include="..\ShortP2P.Client\ChatMedia\ChatWireMlKemCapability.cs" />
 
     <Compile Include="..\ShortP2P.Client\ChatMedia\BotBlobChunker.cs" />
     <Compile Include="..\ShortP2P.Client\ChatMedia\BotChunkRetry.cs" />
@@ -76,6 +77,7 @@
     <Compile Include="..\ShortP2P.Client\Services\ChatDeliveryPath.cs" />
     <Compile Include="..\ShortP2P.Client\Services\PeerBlacklist.cs" />
     <Compile Include="..\ShortP2P.Client\Services\ChatSessionCache.cs" />
+    <Compile Include="..\ShortP2P.Client\Services\PeerMlKemAdvertisePolicy.cs" />
     <Compile Include="..\ShortP2P.Client\Services\PeerKeySource.cs" />
     <Compile Include="..\ShortP2P.Client\Services\LanChatStartContext.cs" />
     <Compile Include="..\ShortP2P.Client\Services\LanChatStartFromDiscovery.cs" />
