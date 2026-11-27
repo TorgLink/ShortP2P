@@ -1171,8 +1171,12 @@ public sealed partial class ChatP2PSession : IAsyncDisposable
         var shouldNotify = false;
         if (ChatWireCodec.TryParse(payload, out var wire) && wire != null)
         {
-            // Reaching plaintext wire means AES decrypt already succeeded on this path.
-            NoteEncryptedPathProof(cancellationToken);
+            // Server-inbox control frames (ML-KEM capability, UserInfo, vocab) are identity-sealed,
+            // not P2P AES — do not treat them as crypto-probe proof.
+            var provesP2pAes = wire is not (ChatWireMlKemCapability or ChatWireUserInfo
+                or ChatWireVocabOffer or ChatWireVocabAccept);
+            if (provesP2pAes)
+                NoteEncryptedPathProof(cancellationToken);
             switch (wire)
             {
                 case ChatWireSessionProbe probe:

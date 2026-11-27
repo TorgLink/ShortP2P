@@ -2776,12 +2776,24 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
             return;
         }
 
+        // ML-KEM capability must reach the session even before StartAsync finishes.
+        // Otherwise peerAdvertisesMlKem stays false when the wire lands during handshake.
+        var isMlKemCapability = ChatWireCodec.TryParse(wire, out var parsedWire) &&
+                                parsedWire is ChatWireMlKemCapability;
+
         if (!blocked &&
             session != null &&
-            session.IsReadyForServerReceive)
+            (session.IsReadyForServerReceive || isMlKemCapability))
         {
             try
             {
+                if (isMlKemCapability && parsedWire is ChatWireMlKemCapability mlKemCap)
+                {
+                    await session.ApplyPeerMlKemCapabilityFromServerAsync(mlKemCap.WantsMlKem, cancellationToken)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
                 await session.IngestIncomingWireFromServerAsync(wire, cancellationToken, blobServerBaseUrl)
                     .ConfigureAwait(false);
                 return;
@@ -2921,6 +2933,21 @@ public sealed class MessengerServerSyncService : IAsyncDisposable
                 case ChatWireUserInfo userInfo:
                     await ApplyIncomingUserInfoFromServerAsync(chatId, userInfo, CancellationToken.None)
                         .ConfigureAwait(false);
+                    return;
+                case ChatWireMlKemCapability mlKemCap:
+                    if (_sessions.TryGetSession(chatId, out var mlKemSession) && mlKemSession != null)
+                    {
+                        await mlKemSession
+                            .ApplyPeerMlKemCapabilityFromServerAsync(mlKemCap.WantsMlKem, CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Chat {ChatId}: ML-KEM capability from server with no live session yet wants={Wants}",
+                            chatId, mlKemCap.WantsMlKem);
+                    }
+
                     return;
                 default:
                     await _chats.AddMessageAsync(chatId, false, "[Серверное сообщение: неподдерживаемый тип]")

@@ -39,6 +39,13 @@ public sealed partial class ChatP2PSession
         return AdvertiseAndEvaluateMlKemAsync(token);
     }
 
+    /// <summary>
+    /// Apply peer ML-KEM capability from messenger-server inbox (may arrive before
+    /// <see cref="IsReadyForServerReceive"/> / handshake Established).
+    /// </summary>
+    public Task ApplyPeerMlKemCapabilityFromServerAsync(bool wantsMlKem, CancellationToken cancellationToken) =>
+        ApplyPeerMlKemAdvertisementAsync(wantsMlKem, cancellationToken);
+
     private void RaiseMlKemSessionChanged()
     {
         if (_uiSynchronizationContext != null)
