@@ -469,7 +469,10 @@ public sealed partial class ChatP2PSession : IAsyncDisposable
         _handshakeStatus = status;
         RaiseHandshakeStatusChanged();
         if (status == ChatHandshakeStatus.Established)
+        {
+            LogSessionEncryptionType("session established after key agreement");
             OnHandshakeEstablishedMaybeAdvertiseMlKem();
+        }
     }
 
     private void RefreshHandshakeStatus()

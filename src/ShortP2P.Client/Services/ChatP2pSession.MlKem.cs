@@ -55,9 +55,21 @@ public sealed partial class ChatP2PSession
         _chat.MlKemSessionVerified = value;
         _ = PersistMlKemVerifiedAsync(value);
         RaiseMlKemSessionChanged();
+        LogSessionEncryptionType(value
+            ? "session encryption switched to ML-KEM"
+            : "session encryption switched to legacy");
+    }
+
+    /// <summary>
+    /// Information log of the negotiated session crypto type (legacy vs ML-KEM / quantum).
+    /// Reflects mutual capability verification; AES key material from ML-KEM remains Phase B.
+    /// </summary>
+    private void LogSessionEncryptionType(string eventName)
+    {
+        var encryption = IsMlKemSession || _chat.MlKemSessionVerified ? "ML-KEM" : "legacy";
         _logger.LogInformation(
-            "Chat {ChatId}: ML-KEM session verified={Verified} (peerAdvertises={Peer}, localWants={Local})",
-            _chat.Id, value, PeerAdvertisesMlKem, LocalWantsMlKem);
+            "Chat {ChatId}: {Event}; encryption={Encryption} (peerAdvertisesMlKem={Peer}, localWantsMlKem={Local})",
+            _chat.Id, eventName, encryption, PeerAdvertisesMlKem, LocalWantsMlKem);
     }
 
     private async Task PersistMlKemVerifiedAsync(bool verified)
