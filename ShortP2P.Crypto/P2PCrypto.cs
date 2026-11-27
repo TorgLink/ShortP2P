@@ -57,4 +57,40 @@ public static class P2PCrypto
         Require.NotNull(session);
         return session.Decrypt(packet);
     }
+
+    /// <summary>
+    ///     Human-readable strength parameters for the classic (non-ML-KEM) P2P session path.
+    ///     Identity is Ed25519 + X25519 (256-bit); session traffic is AES-128-CBC + truncated HMAC-SHA256.
+    /// </summary>
+    public static string DescribeLegacySessionParameters() =>
+        "scheme=legacy " +
+        "identity=Ed25519+X25519 keyBits=256 " +
+        $"handshake=v{P2PHandshake.PacketVersion} ecdh=X25519 " +
+        "wrap=AES-GCM wrapKeyBits=256 nonceBytes=12 tagBytes=16 " +
+        "sessionAes=AES-128-CBC aesKeyBits=128 " +
+        "mac=HMAC-SHA256 macKeyBits=256 macTagBits=128 " +
+        "hkdf=SHA-256";
+
+    /// <summary>
+    ///     Human-readable strength parameters for the experimental ML-KEM capability path.
+    ///     Session AES keying from ML-KEM shared secret is still Phase B; until then traffic keys
+    ///     remain the legacy parameters from <see cref="DescribeLegacySessionParameters"/>.
+    /// </summary>
+    public static string DescribeMlKemSessionParameters(
+        MlKemParameterSet parameterSet = MlKemParameterSet.MlKem768) =>
+        $"scheme=ML-KEM parameterSet={parameterSet} " +
+        $"parameterBits={(int)parameterSet} " +
+        $"publicKeyBytes={MlKemCrypto.PublicKeyByteLength(parameterSet)} " +
+        $"ciphertextBytes={MlKemCrypto.CiphertextByteLength(parameterSet)} " +
+        $"sharedSecretBits={MlKemCrypto.SharedSecretByteLength * 8} " +
+        "sessionKeyDerivation=legacy-until-phase-B " +
+        $"({DescribeLegacySessionParameters()})";
+
+    /// <summary>
+    ///     Parameters for the active negotiated mark: ML-KEM when mutual verify succeeded, else legacy.
+    /// </summary>
+    public static string DescribeSessionParameters(bool mlKemSession) =>
+        mlKemSession
+            ? DescribeMlKemSessionParameters(MlKemCrypto.DefaultParameterSet)
+            : DescribeLegacySessionParameters();
 }

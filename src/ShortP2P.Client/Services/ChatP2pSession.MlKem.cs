@@ -61,16 +61,20 @@ public sealed partial class ChatP2PSession
     }
 
     /// <summary>
-    /// Information log of the negotiated session crypto type (legacy vs ML-KEM / quantum).
+    /// Information log of the negotiated session crypto type (legacy vs ML-KEM / quantum)
+    /// plus cryptographic strength parameters from handshake / session setup.
     /// Reflects mutual capability verification; AES key material from ML-KEM remains Phase B.
     /// </summary>
     private void LogSessionEncryptionType(string eventName)
     {
         // Prefer live mutual-verify flag; fall back to persisted mark for restarted chats.
-        var encryption = IsMlKemSession || _chat.MlKemSessionVerified ? "ML-KEM" : "legacy";
+        var mlKem = IsMlKemSession || _chat.MlKemSessionVerified;
+        var encryption = mlKem ? "ML-KEM" : "legacy";
+        var cryptoParams = P2PCrypto.DescribeSessionParameters(mlKem);
         _logger.LogInformation(
-            "Chat {ChatId}: {Event}; encryption={Encryption} (peerAdvertisesMlKem={Peer}, localWantsMlKem={Local}, handshake={Handshake})",
-            _chat.Id, eventName, encryption, PeerAdvertisesMlKem, LocalWantsMlKem, _handshakeStatus);
+            "Chat {ChatId}: {Event}; encryption={Encryption} (peerAdvertisesMlKem={Peer}, localWantsMlKem={Local}, handshake={Handshake}); cryptoParams={CryptoParams}",
+            _chat.Id, eventName, encryption, PeerAdvertisesMlKem, LocalWantsMlKem, _handshakeStatus,
+            cryptoParams);
     }
 
     private async Task PersistMlKemVerifiedAsync(bool verified)

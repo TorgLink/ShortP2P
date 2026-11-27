@@ -3893,6 +3893,8 @@ public sealed partial class ChatP2PSession : IAsyncDisposable
                                 "Chat {ChatId}: leader crypto session created in cache (role={Role})",
                                 _chat.Id,
                                 SessionRoleLabel());
+                            // Same encryption/strength log as follower handshake and Established.
+                            LogSessionEncryptionType("leader crypto session created from identity handshake");
                             if (_messenger == null)
                             {
                                 _messenger =
