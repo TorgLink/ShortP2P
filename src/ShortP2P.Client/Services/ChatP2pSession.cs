@@ -815,6 +815,9 @@ public sealed partial class ChatP2PSession : IAsyncDisposable
             if (udpUnavailable)
                 await EnqueueLatestUnsentMessagesAsync(cancellationToken).ConfigureAwait(false);
             LogSessionRoleContext("P2P session start completed");
+            // Follower + messenger-server paths often never reach HandshakeStatus.Established
+            // (crypto probe is leader/UDP). Always record the encryption type at start completion.
+            LogSessionEncryptionType("session start completed");
             OnHandshakeEstablishedMaybeAdvertiseMlKem();
         }
         finally
@@ -4086,6 +4089,7 @@ public sealed partial class ChatP2PSession : IAsyncDisposable
                 _logger.LogInformation(
                     "Chat {ChatId}: crypto session created from handshake (role={Role})",
                     _chat.Id, SessionRoleLabel());
+                LogSessionEncryptionType("crypto session created from identity handshake");
 
                 _handshakeWeInitiated = false;
                 if (_messenger == null)
@@ -4390,6 +4394,7 @@ public sealed partial class ChatP2PSession : IAsyncDisposable
             _logger.LogInformation(
                 "Chat {ChatId}: switched send/receive to messenger server {BaseUrl}",
                 _chat.Id, bound.BaseUrl);
+            LogSessionEncryptionType("messenger-server delivery path active");
             RaiseActiveChannelChanged();
             return true;
         }

@@ -66,10 +66,11 @@ public sealed partial class ChatP2PSession
     /// </summary>
     private void LogSessionEncryptionType(string eventName)
     {
+        // Prefer live mutual-verify flag; fall back to persisted mark for restarted chats.
         var encryption = IsMlKemSession || _chat.MlKemSessionVerified ? "ML-KEM" : "legacy";
         _logger.LogInformation(
-            "Chat {ChatId}: {Event}; encryption={Encryption} (peerAdvertisesMlKem={Peer}, localWantsMlKem={Local})",
-            _chat.Id, eventName, encryption, PeerAdvertisesMlKem, LocalWantsMlKem);
+            "Chat {ChatId}: {Event}; encryption={Encryption} (peerAdvertisesMlKem={Peer}, localWantsMlKem={Local}, handshake={Handshake})",
+            _chat.Id, eventName, encryption, PeerAdvertisesMlKem, LocalWantsMlKem, _handshakeStatus);
     }
 
     private async Task PersistMlKemVerifiedAsync(bool verified)
@@ -123,27 +124,57 @@ public sealed partial class ChatP2PSession
     private async Task SendMlKemCapabilityAsync(CancellationToken cancellationToken)
     {
         var wants = LocalWantsMlKem;
+        var delivered = false;
+
         try
         {
             await SendRawMlKemCapabilityFrameAsync(wants, cancellationToken).ConfigureAwait(false);
+            delivered = true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogDebug(ex, "Chat {ChatId}: raw ML-KEM capability frame failed", _chat.Id);
+            _logger.LogDebug(ex, "Chat {ChatId}: raw ML-KEM capability frame (0x05) failed", _chat.Id);
         }
 
-        // Encrypted wire also covers messenger-server relay when UDP/raw handshake frames are unavailable.
+        // P2P AES messenger path (needs completed identity handshake).
         if (_messenger != null && TryGetCryptoSession(out _))
         {
             try
             {
                 var wire = ChatWireCodec.EncodeMlKemCapability(wants);
                 await DeliverControlWireAsync(wire, cancellationToken).ConfigureAwait(false);
+                delivered = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogDebug(ex, "Chat {ChatId}: encrypted ML-KEM capability send failed", _chat.Id);
+                _logger.LogDebug(ex, "Chat {ChatId}: AES ML-KEM capability send failed", _chat.Id);
             }
+        }
+
+        // Messenger-server path: same identity-encrypted ChatWire as normal messages.
+        // Required when UDP is down and P2P AES session is not ready yet (common follower case).
+        try
+        {
+            var wire = ChatWireCodec.EncodeMlKemCapability(wants);
+            var serverMessageId = await TryServerDeliveryAsync(wire, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(serverMessageId))
+            {
+                delivered = true;
+                _logger.LogInformation(
+                    "Chat {ChatId}: ML-KEM capability sent via messenger server wants={Wants} serverMessageId={ServerMessageId}",
+                    _chat.Id, wants, serverMessageId);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Chat {ChatId}: server ML-KEM capability send failed", _chat.Id);
+        }
+
+        if (!delivered)
+        {
+            _logger.LogInformation(
+                "Chat {ChatId}: ML-KEM capability not delivered yet wants={Wants} (peerAdvertisesMlKem still {Peer})",
+                _chat.Id, wants, PeerAdvertisesMlKem);
         }
     }
 
